@@ -66,6 +66,19 @@ class QuizQuestion {
   bool get isAttempted => selectedAnswerIndex != null;
 }
 
+// Chat Message Model
+class ChatMessage {
+  final String text;
+  final bool isUser; // true for user, false for AI
+  final DateTime timestamp;
+
+  ChatMessage({
+    required this.text,
+    required this.isUser,
+    required this.timestamp,
+  });
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -73,8 +86,7 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen>
-    with SingleTickerProviderStateMixin {
+class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   String _selectedFileName = "No file selected";
   String _extractedText = "";
   String _summary = "";
@@ -84,6 +96,12 @@ class _HomeScreenState extends State<HomeScreen>
   bool _isGeneratingQuiz = false;
   bool _showQuizResults = false;
   int _quizScore = 0;
+
+  // Chat related variables
+  List<ChatMessage> _chatMessages = [];
+  final TextEditingController _chatController = TextEditingController();
+  bool _isSendingMessage = false;
+  final ScrollController _chatScrollController = ScrollController();
 
   bool _isLoading = false;
   bool _isGeneratingSummary = false;
@@ -98,17 +116,29 @@ class _HomeScreenState extends State<HomeScreen>
   @override
   void initState() {
     super.initState();
-    _tabController = TabController(length: 3, vsync: this);
+    _tabController = TabController(length: 4, vsync: this); // Changed to 4 tabs
     _tabController.addListener(() {
       setState(() {
         _currentTabIndex = _tabController.index;
       });
     });
+
+    // Add welcome message
+    _chatMessages.add(
+      ChatMessage(
+        text:
+            "👋 Hi! I'm your AI study assistant. Ask me anything about your document!",
+        isUser: false,
+        timestamp: DateTime.now(),
+      ),
+    );
   }
 
   @override
   void dispose() {
     _tabController.dispose();
+    _chatController.dispose();
+    _chatScrollController.dispose();
     super.dispose();
   }
 
@@ -127,6 +157,15 @@ class _HomeScreenState extends State<HomeScreen>
           _summary = "";
           _quizQuestions = [];
           _showQuizResults = false;
+          _chatMessages.clear();
+          _chatMessages.add(
+            ChatMessage(
+              text:
+                  "👋 Hi! I'm your AI study assistant. Ask me anything about your document!",
+              isUser: false,
+              timestamp: DateTime.now(),
+            ),
+          );
           _tabController.animateTo(0);
         });
 
@@ -147,7 +186,7 @@ class _HomeScreenState extends State<HomeScreen>
         _isLoading = false;
         _extractedText = "Error reading PDF: $e";
       });
-      print("Error: $e");
+      debugPrint("Error: $e");
     }
   }
 
@@ -436,6 +475,147 @@ JSON RESPONSE:
     }
   }
 
+  // NEW: Send message to AI chat
+  Future<void> _sendMessage() async {
+    if (_chatController.text.trim().isEmpty) return;
+
+    String userMessage = _chatController.text.trim();
+
+    // Add user message to chat
+    setState(() {
+      _chatMessages.add(
+        ChatMessage(text: userMessage, isUser: true, timestamp: DateTime.now()),
+      );
+      _chatController.clear();
+      _isSendingMessage = true;
+    });
+
+    // Scroll to bottom
+    _scrollToBottom();
+
+    try {
+      String apiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
+
+      if (apiKey.isEmpty) {
+        throw Exception('API key not found');
+      }
+
+      final url = Uri.parse('$_geminiEndpoint?key=$apiKey');
+
+      // Use summary as context if available, otherwise use extracted text
+      String context = _summary.isNotEmpty ? _summary : _extractedText;
+
+      if (context.isEmpty) {
+        // No document loaded
+        setState(() {
+          _chatMessages.add(
+            ChatMessage(
+              text:
+                  "Please upload a PDF first so I can answer questions about your document!",
+              isUser: false,
+              timestamp: DateTime.now(),
+            ),
+          );
+          _isSendingMessage = false;
+        });
+        _scrollToBottom();
+        return;
+      }
+
+      // Truncate context if too long
+      if (context.length > 20000) {
+        context = context.substring(0, 20000) + "...";
+      }
+
+      String prompt =
+          '''
+You are a helpful study assistant. Answer the user's question based ONLY on the following context.
+If the answer cannot be found in the context, say "I don't have enough information about that in the document."
+
+CONTEXT:
+$context
+
+USER QUESTION: $userMessage
+
+ANSWER (be concise but helpful):
+''';
+
+      final requestBody = {
+        "contents": [
+          {
+            "parts": [
+              {"text": prompt},
+            ],
+          },
+        ],
+        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
+      };
+
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode(requestBody),
+      );
+
+      if (response.statusCode == 200) {
+        final jsonResponse = jsonDecode(response.body);
+        String aiResponse =
+            jsonResponse['candidates'][0]['content']['parts'][0]['text'];
+
+        setState(() {
+          _chatMessages.add(
+            ChatMessage(
+              text: aiResponse,
+              isUser: false,
+              timestamp: DateTime.now(),
+            ),
+          );
+          _isSendingMessage = false;
+        });
+      } else if (response.statusCode == 429) {
+        setState(() {
+          _chatMessages.add(
+            ChatMessage(
+              text:
+                  "⏳ Rate limit reached. Please wait a minute before sending more messages.",
+              isUser: false,
+              timestamp: DateTime.now(),
+            ),
+          );
+          _isSendingMessage = false;
+        });
+      } else {
+        throw Exception('API Error: ${response.statusCode}');
+      }
+    } catch (e) {
+      setState(() {
+        _chatMessages.add(
+          ChatMessage(
+            text:
+                "Sorry, I encountered an error: ${e.toString().substring(0, 100)}",
+            isUser: false,
+            timestamp: DateTime.now(),
+          ),
+        );
+        _isSendingMessage = false;
+      });
+    }
+
+    _scrollToBottom();
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_chatScrollController.hasClients) {
+        _chatScrollController.animateTo(
+          _chatScrollController.position.maxScrollExtent,
+          duration: const Duration(milliseconds: 300),
+          curve: Curves.easeOut,
+        );
+      }
+    });
+  }
+
   void _selectAnswer(int questionIndex, int answerIndex) {
     setState(() {
       _quizQuestions[questionIndex].selectedAnswerIndex = answerIndex;
@@ -473,6 +653,15 @@ JSON RESPONSE:
       _summary = "";
       _quizQuestions = [];
       _showQuizResults = false;
+      _chatMessages.clear();
+      _chatMessages.add(
+        ChatMessage(
+          text:
+              "👋 Hi! I'm your AI study assistant. Ask me anything about your document!",
+          isUser: false,
+          timestamp: DateTime.now(),
+        ),
+      );
     });
     _tabController.animateTo(0);
   }
@@ -495,6 +684,7 @@ JSON RESPONSE:
                   Tab(icon: Icon(Icons.text_snippet), text: 'Text'),
                   Tab(icon: Icon(Icons.auto_awesome), text: 'Summary'),
                   Tab(icon: Icon(Icons.quiz), text: 'Quiz'),
+                  Tab(icon: Icon(Icons.chat), text: 'Chat'), // New Chat Tab
                 ],
                 indicatorColor: Colors.white,
                 indicatorWeight: 3,
@@ -505,7 +695,8 @@ JSON RESPONSE:
         actions: [
           if (_extractedText.isNotEmpty ||
               _summary.isNotEmpty ||
-              _quizQuestions.isNotEmpty)
+              _quizQuestions.isNotEmpty ||
+              _chatMessages.length > 1)
             IconButton(
               icon: const Icon(Icons.delete_outline),
               onPressed: _clearAll,
@@ -699,6 +890,9 @@ JSON RESPONSE:
                                   color: Colors.orange,
                                 )
                               : _buildQuizTab(),
+
+                          // NEW: Chat Tab
+                          _buildChatTab(),
                         ],
                       ),
                     ),
@@ -744,6 +938,11 @@ JSON RESPONSE:
                           label: '${_quizQuestions.length} questions',
                           color: Colors.orange,
                         ),
+                      _buildStatItem(
+                        icon: Icons.chat,
+                        label: '${_chatMessages.length} msgs',
+                        color: Colors.purple,
+                      ),
                     ],
                   ),
                 ),
@@ -1133,6 +1332,157 @@ JSON RESPONSE:
           ),
         ),
       ],
+    );
+  }
+
+  // NEW: Build Chat Tab
+  Widget _buildChatTab() {
+    return Column(
+      children: [
+        // Chat messages
+        Expanded(
+          child: _chatMessages.isEmpty
+              ? _buildEmptyState(
+                  icon: Icons.chat,
+                  message: 'Ask questions about your document',
+                  color: Colors.purple,
+                )
+              : ListView.builder(
+                  controller: _chatScrollController,
+                  padding: const EdgeInsets.all(16),
+                  itemCount: _chatMessages.length,
+                  itemBuilder: (context, index) {
+                    final message = _chatMessages[index];
+                    return _buildChatBubble(message);
+                  },
+                ),
+        ),
+        // Message input
+        Container(
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.grey.shade50,
+            border: Border(top: BorderSide(color: Colors.grey.shade200)),
+          ),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: _chatController,
+                  decoration: InputDecoration(
+                    hintText: _extractedText.isEmpty
+                        ? 'Upload a PDF first...'
+                        : 'Ask a question...',
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(25),
+                      borderSide: BorderSide.none,
+                    ),
+                    filled: true,
+                    fillColor: Colors.white,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 20,
+                      vertical: 12,
+                    ),
+                  ),
+                  maxLines: null,
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) =>
+                      _extractedText.isNotEmpty ? _sendMessage() : null,
+                  enabled: _extractedText.isNotEmpty && !_isSendingMessage,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Container(
+                decoration: BoxDecoration(
+                  color: _extractedText.isEmpty
+                      ? Colors.grey.shade300
+                      : Colors.purple,
+                  shape: BoxShape.circle,
+                ),
+                child: IconButton(
+                  icon: _isSendingMessage
+                      ? const SizedBox(
+                          width: 24,
+                          height: 24,
+                          child: CircularProgressIndicator(
+                            color: Colors.white,
+                            strokeWidth: 2,
+                          ),
+                        )
+                      : const Icon(Icons.send, color: Colors.white),
+                  onPressed: _extractedText.isNotEmpty && !_isSendingMessage
+                      ? _sendMessage
+                      : null,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  // NEW: Build chat bubble
+  Widget _buildChatBubble(ChatMessage message) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: Row(
+        mainAxisAlignment: message.isUser
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
+        children: [
+          if (!message.isUser) ...[
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: Colors.purple.shade100,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(
+                Icons.auto_awesome,
+                color: Colors.purple,
+                size: 18,
+              ),
+            ),
+            const SizedBox(width: 8),
+          ],
+          Flexible(
+            child: Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: message.isUser ? Colors.purple : Colors.grey.shade200,
+                borderRadius: BorderRadius.circular(20).copyWith(
+                  bottomLeft: message.isUser
+                      ? const Radius.circular(20)
+                      : const Radius.circular(4),
+                  bottomRight: message.isUser
+                      ? const Radius.circular(4)
+                      : const Radius.circular(20),
+                ),
+              ),
+              child: Text(
+                message.text,
+                style: TextStyle(
+                  color: message.isUser ? Colors.white : Colors.black87,
+                ),
+              ),
+            ),
+          ),
+          if (message.isUser) ...[
+            const SizedBox(width: 8),
+            Container(
+              width: 36,
+              height: 36,
+              decoration: BoxDecoration(
+                color: Colors.purple.shade200,
+                shape: BoxShape.circle,
+              ),
+              child: const Icon(Icons.person, color: Colors.white, size: 18),
+            ),
+          ],
+        ],
+      ),
     );
   }
 }
