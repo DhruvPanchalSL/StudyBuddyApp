@@ -39,6 +39,9 @@ dependencies:
   path_provider: ^2.1.5
   http: ^1.6.0
   flutter_dotenv: ^6.0.0
+  firebase_core: ^2.24.2
+  firebase_auth: ^4.16.0
+  cloud_firestore: ^4.15.5
 
 dev_dependencies:
   flutter_test:

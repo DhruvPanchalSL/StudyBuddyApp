@@ -1,14 +1,23 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:ai_app/auth_screen.dart';
+import 'package:ai_app/models/quiz_history.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
+import 'history_screen.dart';
+
 void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
   await dotenv.load();
+  await Firebase.initializeApp();
   runApp(const MyApp());
 }
 
@@ -32,7 +41,21 @@ class MyApp extends StatelessWidget {
           ),
         ),
       ),
-      home: const HomeScreen(),
+      home: StreamBuilder(
+        stream: FirebaseAuth.instance.authStateChanges(),
+        builder: (context, snapshot) {
+          if (snapshot.connectionState == ConnectionState.active) {
+            User? user = snapshot.data;
+            if (user == null) {
+              return const AuthScreen();
+            }
+            return HomeScreen();
+          }
+          return const Scaffold(
+            body: Center(child: CircularProgressIndicator()),
+          );
+        },
+      ),
     );
   }
 }
@@ -622,6 +645,86 @@ ANSWER (be concise but helpful):
     });
   }
 
+  // Add this import at the top
+
+  // Replace your existing _saveQuizToHistory with this:
+  Future<void> _saveQuizToHistory() async {
+    try {
+      final user = FirebaseAuth.instance.currentUser;
+      if (user == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Please login to save quiz history'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
+
+      // Show saving indicator
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Saving quiz to history...'),
+          duration: Duration(seconds: 1),
+        ),
+      );
+
+      // Create list of question details
+      List<Map<String, dynamic>> questionDetails = [];
+      for (var q in _quizQuestions) {
+        questionDetails.add({
+          'question': q.question,
+          'options': q.options,
+          'userAnswer': q.selectedAnswerIndex,
+          'correctAnswer': q.correctAnswerIndex,
+          'isCorrect': q.isCorrect,
+          'explanation': q.explanation,
+        });
+      }
+
+      // Create history object
+      final history = QuizHistory(
+        id: DateTime.now().millisecondsSinceEpoch.toString(),
+        userId: user.uid,
+        date: DateTime.now(),
+        pdfName: _selectedFileName,
+        score: _quizScore,
+        totalQuestions: _quizQuestions.length,
+        questions: questionDetails,
+      );
+
+      // Save to Firestore
+      await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('quiz_history')
+          .doc(history.id)
+          .set(history.toMap());
+
+      // Show success message
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ Quiz saved to history!'),
+            backgroundColor: Colors.green,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    } catch (e) {
+      print('Error saving quiz history: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error saving quiz: $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+          ),
+        );
+      }
+    }
+  }
+
   void _submitQuiz() {
     int score = 0;
     for (var question in _quizQuestions) {
@@ -634,6 +737,7 @@ ANSWER (be concise but helpful):
       _quizScore = score;
       _showQuizResults = true;
     });
+    _saveQuizToHistory();
   }
 
   void _resetQuiz() {
@@ -674,6 +778,7 @@ ANSWER (be concise but helpful):
           'Study Buddy AI',
           style: TextStyle(fontWeight: FontWeight.w500, letterSpacing: 0.5),
         ),
+
         backgroundColor: Colors.blue,
         foregroundColor: Colors.white,
         elevation: 0,
@@ -693,6 +798,24 @@ ANSWER (be concise but helpful):
               )
             : null,
         actions: [
+          IconButton(
+            icon: const Icon(Icons.history),
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (context) => const HistoryScreen()),
+              );
+            },
+            tooltip: 'View History',
+          ),
+          IconButton(
+            onPressed: () async {
+              await FirebaseAuth.instance.signOut();
+            },
+            tooltip: 'Logout',
+            icon: Icon(Icons.logout),
+          ),
+
           if (_extractedText.isNotEmpty ||
               _summary.isNotEmpty ||
               _quizQuestions.isNotEmpty ||
