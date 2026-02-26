@@ -1,8 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:ai_app/auth_screen.dart';
-import 'package:ai_app/models/quiz_history.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -12,7 +10,11 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
+import 'auth_screen.dart';
 import 'history_screen.dart';
+import 'models/chat_message.dart';
+import 'models/quiz_history.dart';
+import 'models/quiz_question.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -58,48 +60,6 @@ class MyApp extends StatelessWidget {
       ),
     );
   }
-}
-
-// Quiz Question Model
-class QuizQuestion {
-  final String question;
-  final List<String> options;
-  final int correctAnswerIndex;
-  final String explanation;
-  int? selectedAnswerIndex;
-
-  QuizQuestion({
-    required this.question,
-    required this.options,
-    required this.correctAnswerIndex,
-    required this.explanation,
-    this.selectedAnswerIndex,
-  });
-
-  factory QuizQuestion.fromJson(Map<String, dynamic> json) {
-    return QuizQuestion(
-      question: json['question'] ?? 'No question',
-      options: List<String>.from(json['options'] ?? ['A', 'B', 'C', 'D']),
-      correctAnswerIndex: json['correctAnswerIndex'] ?? 0,
-      explanation: json['explanation'] ?? 'No explanation available',
-    );
-  }
-
-  bool get isCorrect => selectedAnswerIndex == correctAnswerIndex;
-  bool get isAttempted => selectedAnswerIndex != null;
-}
-
-// Chat Message Model
-class ChatMessage {
-  final String text;
-  final bool isUser; // true for user, false for AI
-  final DateTime timestamp;
-
-  ChatMessage({
-    required this.text,
-    required this.isUser,
-    required this.timestamp,
-  });
 }
 
 class HomeScreen extends StatefulWidget {
