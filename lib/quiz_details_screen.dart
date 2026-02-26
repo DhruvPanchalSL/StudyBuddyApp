@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 
 import 'models/quiz_history.dart';
 
+const Color _kLime = Color(0xFFAAFF00);
+const Color _kDark = Color(0xFF1C1C2E);
+
 class QuizDetailsScreen extends StatefulWidget {
   final QuizHistory history;
 
@@ -29,7 +32,7 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
 
   Color _getScoreColor() {
     double percentage = widget.history.score / widget.history.totalQuestions;
-    if (percentage >= 0.8) return Colors.green;
+    if (percentage >= 0.8) return const Color(0xFF22C55E);
     if (percentage >= 0.5) return Colors.orange;
     return Colors.red;
   }
@@ -37,159 +40,188 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: const Color(0xFFF5F5F7),
       appBar: AppBar(
-        title: Text(
-          'Quiz Review',
-          style: const TextStyle(fontWeight: FontWeight.w500),
+        backgroundColor: Colors.white,
+        foregroundColor: _kDark,
+        elevation: 0,
+        title: const Text(
+          'Quiz Results',
+          style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18),
         ),
-        backgroundColor: Colors.blue,
-        foregroundColor: Colors.white,
-        elevation: 2,
+        centerTitle: true,
+        actions: [
+          IconButton(
+            icon: Icon(Icons.share_outlined, color: _kDark),
+            onPressed: () {},
+          ),
+        ],
         bottom: TabBar(
           controller: _tabController,
           tabs: const [
-            Tab(text: 'Summary', icon: Icon(Icons.analytics)),
-            Tab(text: 'Questions', icon: Icon(Icons.quiz)),
+            Tab(text: 'Summary'),
+            Tab(text: 'Questions'),
           ],
-          indicatorColor: Colors.white,
+          labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w400),
+          labelColor: _kDark,
+          unselectedLabelColor: Colors.grey,
+          indicatorColor: _kLime,
           indicatorWeight: 3,
-          labelColor: Colors.white,
-          unselectedLabelColor: Colors.white70,
+          dividerColor: Colors.grey.shade200,
         ),
       ),
-      body: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Colors.blue.shade50, Colors.white],
-          ),
-        ),
-        child: TabBarView(
-          controller: _tabController,
-          children: [
-            // Summary Tab
-            _buildSummaryTab(),
-            // Questions Tab
-            _buildQuestionsTab(),
-          ],
-        ),
+      body: TabBarView(
+        controller: _tabController,
+        children: [
+          _buildSummaryTab(),
+          _buildQuestionsTab(),
+        ],
       ),
     );
   }
 
   Widget _buildSummaryTab() {
+    final pct = ((widget.history.score / widget.history.totalQuestions) * 100).round();
+    final label = pct >= 80
+        ? 'Mastery Achieved'
+        : pct >= 50
+            ? 'Good Progress'
+            : 'Keep Practicing';
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(16),
       child: Column(
         children: [
-          // Score Card
-          Card(
-            elevation: 4,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
+          const SizedBox(height: 16),
+          // Circular Score
+          Stack(
+            alignment: Alignment.center,
+            children: [
+              SizedBox(
+                width: 150,
+                height: 150,
+                child: CircularProgressIndicator(
+                  value: widget.history.score / widget.history.totalQuestions,
+                  strokeWidth: 10,
+                  backgroundColor: Colors.grey.shade200,
+                  valueColor: AlwaysStoppedAnimation<Color>(_getScoreColor()),
+                  strokeCap: StrokeCap.round,
+                ),
+              ),
+              Column(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  const Text(
-                    'Your Score',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.grey,
+                  Text(
+                    '$pct',
+                    style: const TextStyle(
+                      fontSize: 42,
+                      fontWeight: FontWeight.w900,
+                      color: _kDark,
                     ),
                   ),
-                  const SizedBox(height: 16),
-                  Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      SizedBox(
-                        width: 150,
-                        height: 150,
-                        child: CircularProgressIndicator(
-                          value:
-                              widget.history.score /
-                              widget.history.totalQuestions,
-                          strokeWidth: 10,
-                          backgroundColor: Colors.grey.shade200,
-                          valueColor: AlwaysStoppedAnimation<Color>(
-                            _getScoreColor(),
-                          ),
-                        ),
-                      ),
-                      Column(
-                        children: [
-                          Text(
-                            '${widget.history.score}/${widget.history.totalQuestions}',
-                            style: TextStyle(
-                              fontSize: 32,
-                              fontWeight: FontWeight.bold,
-                              color: _getScoreColor(),
-                            ),
-                          ),
-                          Text(
-                            '${((widget.history.score / widget.history.totalQuestions) * 100).round()}%',
-                            style: TextStyle(
-                              fontSize: 16,
-                              color: Colors.grey.shade600,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-                  _buildInfoRow(
-                    icon: Icons.picture_as_pdf,
-                    label: 'Document',
-                    value: widget.history.pdfName,
-                  ),
-                  _buildInfoRow(
-                    icon: Icons.calendar_today,
-                    label: 'Date',
-                    value: _formatDate(widget.history.date),
-                  ),
-                  _buildInfoRow(
-                    icon: Icons.check_circle,
-                    label: 'Correct Answers',
-                    value: '${widget.history.score}',
-                    valueColor: Colors.green,
-                  ),
-                  _buildInfoRow(
-                    icon: Icons.cancel,
-                    label: 'Wrong Answers',
-                    value:
-                        '${widget.history.totalQuestions - widget.history.score}',
-                    valueColor: Colors.red,
+                  Text(
+                    'SCORE',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      letterSpacing: 1.2,
+                      color: Colors.grey.shade400,
+                    ),
                   ),
                 ],
               ),
+            ],
+          ),
+
+          const SizedBox(height: 14),
+
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 18,
+              fontWeight: FontWeight.w800,
+              color: _getScoreColor(),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            widget.history.pdfName,
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
+            textAlign: TextAlign.center,
+          ),
+
+          const SizedBox(height: 18),
+
+          // Stats row
+          Row(
+            children: [
+              Expanded(
+                child: _buildStatChip(
+                  Icons.check_circle_outline,
+                  '${widget.history.score} Correct',
+                  const Color(0xFFDCFCE7),
+                  const Color(0xFF22C55E),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: _buildStatChip(
+                  Icons.percent_rounded,
+                  '$pct% Accuracy',
+                  const Color(0xFFDCFCE7),
+                  const Color(0xFF22C55E),
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 14),
+
+          // Doc info card
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.grey.shade100),
+            ),
+            child: Column(
+              children: [
+                _buildInfoRow(Icons.picture_as_pdf_rounded, 'Document', widget.history.pdfName),
+                _buildInfoRow(Icons.calendar_today_outlined, 'Date', _formatDate(widget.history.date)),
+                _buildInfoRow(Icons.check_circle_outline, 'Correct Answers',
+                    '${widget.history.score}', valueColor: const Color(0xFF22C55E)),
+                _buildInfoRow(Icons.cancel_outlined, 'Wrong Answers',
+                    '${widget.history.totalQuestions - widget.history.score}', valueColor: Colors.red),
+              ],
             ),
           ),
 
-          const SizedBox(height: 16),
+          const SizedBox(height: 14),
 
-          // Performance Breakdown Card
-          Card(
-            elevation: 2,
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
+          // Difficulty breakdown card
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(color: Colors.grey.shade100),
             ),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const Text(
-                    'Performance Breakdown',
-                    style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Difficulty Analysis',
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w700,
+                    color: _kDark,
                   ),
-                  const SizedBox(height: 16),
-                  ..._getPerformanceBreakdown(),
-                ],
-              ),
+                ),
+                const SizedBox(height: 12),
+                ..._getPerformanceBreakdown(),
+              ],
             ),
           ),
         ],
@@ -197,33 +229,52 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
     );
   }
 
-  Widget _buildInfoRow({
-    required IconData icon,
-    required String label,
-    required String value,
-    Color? valueColor,
-  }) {
+  Widget _buildStatChip(IconData icon, String text, Color bg, Color iconColor) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: iconColor),
+          const SizedBox(width: 6),
+          Flexible(
+            child: Text(
+              text,
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: iconColor),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildInfoRow(IconData icon, String label, String value, {Color? valueColor}) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.symmetric(vertical: 7),
       child: Row(
         children: [
-          Icon(icon, size: 20, color: Colors.blue.shade300),
-          const SizedBox(width: 12),
+          Icon(icon, size: 18, color: Colors.grey.shade400),
+          const SizedBox(width: 10),
           Text(
             '$label:',
-            style: TextStyle(fontSize: 14, color: Colors.grey.shade600),
+            style: TextStyle(fontSize: 13, color: Colors.grey.shade500),
           ),
           const SizedBox(width: 8),
           Expanded(
             child: Text(
               value,
               style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: valueColor ?? Colors.black87,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: valueColor ?? _kDark,
               ),
               maxLines: 2,
               overflow: TextOverflow.ellipsis,
+              textAlign: TextAlign.end,
             ),
           ),
         ],
@@ -235,15 +286,12 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
     List<Widget> widgets = [];
     var questions = widget.history.questions;
 
-    // Calculate statistics
     int easyCorrect = 0;
     int mediumCorrect = 0;
     int hardCorrect = 0;
 
-    // This is simplified - you can make it more sophisticated
     for (var q in questions) {
       bool isCorrect = q['isCorrect'] ?? false;
-      // Just a simple categorization for demo
       if (isCorrect) {
         if (questions.indexOf(q) % 3 == 0)
           easyCorrect++;
@@ -254,63 +302,46 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
       }
     }
 
-    widgets.add(
-      _buildProgressIndicator(
-        'Easy Questions',
-        easyCorrect,
-        questions.length ~/ 3,
-        Colors.green,
-      ),
-    );
-    widgets.add(
-      _buildProgressIndicator(
-        'Medium Questions',
-        mediumCorrect,
-        questions.length ~/ 3,
-        Colors.orange,
-      ),
-    );
-    widgets.add(
-      _buildProgressIndicator(
-        'Hard Questions',
-        hardCorrect,
-        questions.length - (questions.length ~/ 3 * 2),
-        Colors.red,
-      ),
-    );
+    widgets.add(_buildProgressRow('Easy', easyCorrect, questions.length ~/ 3, Colors.green));
+    widgets.add(_buildProgressRow('Intermediate', mediumCorrect, questions.length ~/ 3, Colors.orange));
+    widgets.add(_buildProgressRow('Advanced', hardCorrect, questions.length - (questions.length ~/ 3 * 2), Colors.red));
 
     return widgets;
   }
 
-  Widget _buildProgressIndicator(
-    String label,
-    int correct,
-    int total,
-    Color color,
-  ) {
-    if (total == 0) return const SizedBox();
+  Widget _buildProgressRow(String label, int correct, int total, Color color) {
+    if (total <= 0) return const SizedBox();
+    final pct = (correct / total * 100).round();
     return Padding(
-      padding: const EdgeInsets.only(bottom: 12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
+      padding: const EdgeInsets.only(bottom: 10),
+      child: Row(
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Text(label, style: const TextStyle(fontWeight: FontWeight.w500)),
-              Text(
-                '$correct/$total',
-                style: TextStyle(color: color, fontWeight: FontWeight.bold),
-              ),
-            ],
+          SizedBox(
+            width: 90,
+            child: Text(
+              label,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: _kDark),
+            ),
           ),
-          const SizedBox(height: 4),
-          LinearProgressIndicator(
-            value: correct / total,
-            backgroundColor: Colors.grey.shade200,
-            valueColor: AlwaysStoppedAnimation<Color>(color),
-            minHeight: 8,
-            borderRadius: BorderRadius.circular(4),
+          Expanded(
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: correct / total,
+                backgroundColor: Colors.grey.shade200,
+                valueColor: AlwaysStoppedAnimation<Color>(color),
+                minHeight: 6,
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 36,
+            child: Text(
+              '$pct%',
+              style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: color),
+              textAlign: TextAlign.right,
+            ),
           ),
         ],
       ),
@@ -323,166 +354,174 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
       itemCount: widget.history.questions.length,
       itemBuilder: (context, index) {
         final question = widget.history.questions[index];
-        return Card(
-          margin: const EdgeInsets.only(bottom: 16),
-          elevation: 2,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
+        final isCorrect = question['isCorrect'] == true;
+
+        return Container(
+          margin: const EdgeInsets.only(bottom: 12),
+          padding: const EdgeInsets.all(14),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(
+              color: isCorrect ? const Color(0xFF22C55E).withOpacity(0.3) : Colors.red.withOpacity(0.3),
+            ),
           ),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Question header
-                Row(
-                  children: [
-                    Container(
-                      width: 32,
-                      height: 32,
-                      decoration: BoxDecoration(
-                        color: question['isCorrect'] == true
-                            ? Colors.green.shade100
-                            : Colors.red.shade100,
-                        shape: BoxShape.circle,
-                      ),
-                      child: Center(
-                        child: Icon(
-                          question['isCorrect'] == true
-                              ? Icons.check
-                              : Icons.close,
-                          size: 18,
-                          color: question['isCorrect'] == true
-                              ? Colors.green
-                              : Colors.red,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        'Question ${index + 1}',
-                        style: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-
-                const SizedBox(height: 12),
-
-                // Question text
-                Text(
-                  question['question'] ?? 'No question',
-                  style: const TextStyle(fontSize: 15),
-                ),
-
-                const SizedBox(height: 16),
-
-                // Options
-                ...List.generate((question['options'] as List).length, (
-                  optIndex,
-                ) {
-                  String option = question['options'][optIndex];
-                  bool isUserAnswer = question['userAnswer'] == optIndex;
-                  bool isCorrectAnswer = question['correctAnswer'] == optIndex;
-
-                  Color bgColor = Colors.transparent;
-                  Color borderColor = Colors.grey.shade300;
-
-                  if (isCorrectAnswer) {
-                    bgColor = Colors.green.shade50;
-                    borderColor = Colors.green;
-                  } else if (isUserAnswer && !isCorrectAnswer) {
-                    bgColor = Colors.red.shade50;
-                    borderColor = Colors.red;
-                  }
-
-                  return Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Container(
+                    width: 28,
+                    height: 28,
                     decoration: BoxDecoration(
-                      color: bgColor,
+                      color: isCorrect ? const Color(0xFFDCFCE7) : Colors.red.shade50,
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: borderColor),
                     ),
-                    child: Row(
-                      children: [
-                        Text(
-                          '${String.fromCharCode(65 + optIndex)}.',
-                          style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: borderColor,
+                    child: Center(
+                      child: Icon(
+                        isCorrect ? Icons.check_rounded : Icons.close_rounded,
+                        size: 16,
+                        color: isCorrect ? const Color(0xFF22C55E) : Colors.red,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: Text(
+                      question['question'] ?? 'No question',
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: _kDark,
+                        height: 1.4,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 12),
+
+              ...List.generate((question['options'] as List).length, (optIndex) {
+                String option = question['options'][optIndex];
+                bool isUserAnswer = question['userAnswer'] == optIndex;
+                bool isCorrectAnswer = question['correctAnswer'] == optIndex;
+                final letter = String.fromCharCode(65 + optIndex);
+
+                Color bgColor = Colors.grey.shade50;
+                Color borderColor = Colors.grey.shade200;
+
+                if (isCorrectAnswer) {
+                  bgColor = const Color(0xFFDCFCE7);
+                  borderColor = const Color(0xFF22C55E);
+                } else if (isUserAnswer && !isCorrectAnswer) {
+                  bgColor = Colors.red.shade50;
+                  borderColor = Colors.red;
+                }
+
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 7),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                  decoration: BoxDecoration(
+                    color: bgColor,
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: borderColor),
+                  ),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 22,
+                        height: 22,
+                        decoration: BoxDecoration(
+                          color: isCorrectAnswer
+                              ? const Color(0xFF22C55E)
+                              : isUserAnswer && !isCorrectAnswer
+                                  ? Colors.red
+                                  : Colors.white,
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: isCorrectAnswer
+                                ? const Color(0xFF22C55E)
+                                : isUserAnswer && !isCorrectAnswer
+                                    ? Colors.red
+                                    : Colors.grey.shade300,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Expanded(
+                        child: Center(
                           child: Text(
-                            option,
+                            letter,
                             style: TextStyle(
-                              fontWeight:
-                                  isCorrectAnswer ||
-                                      (isUserAnswer && !isCorrectAnswer)
-                                  ? FontWeight.w500
-                                  : FontWeight.normal,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w700,
+                              color: (isCorrectAnswer || (isUserAnswer && !isCorrectAnswer))
+                                  ? Colors.white
+                                  : Colors.grey.shade500,
                             ),
                           ),
                         ),
-                        if (isCorrectAnswer)
-                          const Icon(
-                            Icons.check_circle,
-                            color: Colors.green,
-                            size: 18,
-                          ),
-                        if (isUserAnswer && !isCorrectAnswer)
-                          const Icon(Icons.cancel, color: Colors.red, size: 18),
-                      ],
-                    ),
-                  );
-                }),
-
-                // Explanation
-                if (question['explanation'] != null)
-                  Container(
-                    margin: const EdgeInsets.only(top: 12),
-                    padding: const EdgeInsets.all(12),
-                    decoration: BoxDecoration(
-                      color: Colors.blue.shade50,
-                      borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.blue.shade200),
-                    ),
-                    child: Row(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Icon(
-                          Icons.lightbulb,
-                          size: 20,
-                          color: Colors.blue.shade700,
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                'Explanation',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.blue.shade700,
-                                ),
-                              ),
-                              const SizedBox(height: 4),
-                              Text(question['explanation']),
-                            ],
+                      ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          option,
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: (isCorrectAnswer || (isUserAnswer && !isCorrectAnswer))
+                                ? FontWeight.w600
+                                : FontWeight.w400,
+                            color: _kDark,
                           ),
                         ),
-                      ],
-                    ),
+                      ),
+                      if (isCorrectAnswer)
+                        const Icon(Icons.check_circle, color: Color(0xFF22C55E), size: 16),
+                      if (isUserAnswer && !isCorrectAnswer)
+                        const Icon(Icons.cancel, color: Colors.red, size: 16),
+                    ],
                   ),
-              ],
-            ),
+                );
+              }),
+
+              if (question['explanation'] != null)
+                Container(
+                  margin: const EdgeInsets.only(top: 10),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: _kLime.withOpacity(0.08),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: _kLime.withOpacity(0.3)),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Icon(Icons.lightbulb_outline_rounded, size: 16, color: _kDark),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Text(
+                              'Explanation',
+                              style: TextStyle(
+                                fontWeight: FontWeight.w700,
+                                fontSize: 12,
+                                color: _kDark,
+                              ),
+                            ),
+                            const SizedBox(height: 3),
+                            Text(
+                              question['explanation'],
+                              style: TextStyle(fontSize: 12, color: Colors.grey.shade700, height: 1.4),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
           ),
         );
       },
