@@ -7,7 +7,9 @@ import 'models/quiz_history.dart';
 import 'quiz_details_screen.dart';
 
 class HistoryScreen extends StatefulWidget {
-  const HistoryScreen({super.key});
+  final Function(int)? onTabChange;
+  final bool isTab;
+  const HistoryScreen({super.key, this.onTabChange, this.isTab = false});
 
   @override
   State<HistoryScreen> createState() => _HistoryScreenState();
@@ -103,6 +105,51 @@ class _HistoryScreenState extends State<HistoryScreen>
       );
     }
 
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Tab bar (All Archive / Quizzes / Summaries)
+        Container(
+          color: _bgWhite,
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 14),
+          child: Row(
+            children: [
+              _buildTabPill('All Archive', 0),
+              const SizedBox(width: 8),
+              _buildTabPill('Quizzes', 1),
+              const SizedBox(width: 8),
+              _buildTabPill('Summaries', 2),
+            ],
+          ),
+        ),
+
+        // "RECENT SESSIONS" label
+        Padding(
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
+          child: Text(
+            'RECENT SESSIONS',
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w700,
+              color: _textGray,
+              letterSpacing: 1.3,
+            ),
+          ),
+        ),
+
+        // Sessions list
+        Expanded(
+          child: _selectedTabIndex == 2
+              ? _buildSummariesTab()
+              : _buildQuizzesTab(),
+        ),
+      ],
+    );
+
+    if (widget.isTab) {
+      return body;
+    }
+
     return Scaffold(
       backgroundColor: _bgGray,
       appBar: AppBar(
@@ -132,46 +179,7 @@ class _HistoryScreenState extends State<HistoryScreen>
           ),
         ],
       ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Tab bar (All Archive / Quizzes / Summaries)
-          Container(
-            color: _bgWhite,
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 14),
-            child: Row(
-              children: [
-                _buildTabPill('All Archive', 0),
-                const SizedBox(width: 8),
-                _buildTabPill('Quizzes', 1),
-                const SizedBox(width: 8),
-                _buildTabPill('Summaries', 2),
-              ],
-            ),
-          ),
-
-          // "RECENT SESSIONS" label
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 18, 20, 10),
-            child: Text(
-              'RECENT SESSIONS',
-              style: TextStyle(
-                fontSize: 11,
-                fontWeight: FontWeight.w700,
-                color: _textGray,
-                letterSpacing: 1.3,
-              ),
-            ),
-          ),
-
-          // Sessions list
-          Expanded(
-            child: _selectedTabIndex == 2
-                ? _buildSummariesTab()
-                : _buildQuizzesTab(),
-          ),
-        ],
-      ),
+      body: body,
       // Green FAB
       floatingActionButton: FloatingActionButton(
         onPressed: () => Navigator.pop(context),
@@ -557,31 +565,59 @@ class _HistoryScreenState extends State<HistoryScreen>
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceAround,
         children: [
-          _buildNavItem(Icons.home_rounded, 'Home', false),
-          _buildNavItem(Icons.library_books_rounded, 'Library', true),
+          _buildNavItem(Icons.home_rounded, 'Home', false, () {
+            if (widget.onTabChange != null) {
+              widget.onTabChange!(0);
+            } else if (Navigator.canPop(context)) {
+              Navigator.pop(context);
+            }
+          }),
+          _buildNavItem(Icons.library_books_rounded, 'Library', true, () {}),
           const SizedBox(width: 56), // Space for FAB
-          _buildNavItem(Icons.auto_fix_high_rounded, 'Flashcards', false),
-          _buildNavItem(Icons.person_rounded, 'Profile', false),
+          _buildNavItem(Icons.auto_fix_high_rounded, 'Flashcards', false, () {
+            if (widget.onTabChange != null) {
+              widget.onTabChange!(2);
+            } else if (Navigator.canPop(context)) {
+              Navigator.pop(context);
+              // We could pass result but sticking to simple pop for now
+            }
+          }),
+          _buildNavItem(Icons.person_rounded, 'Profile', false, () {
+            if (widget.onTabChange != null) {
+              widget.onTabChange!(3);
+            } else if (Navigator.canPop(context)) {
+              Navigator.pop(context);
+            }
+          }),
         ],
       ),
     );
   }
 
-  Widget _buildNavItem(IconData icon, String label, bool isActive) {
-    return Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Icon(icon, color: isActive ? _green : _textGray, size: 24),
-        const SizedBox(height: 3),
-        Text(
-          label,
-          style: TextStyle(
-            fontSize: 11,
-            color: isActive ? _green : _textGray,
-            fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+  Widget _buildNavItem(
+    IconData icon,
+    String label,
+    bool isActive,
+    VoidCallback onTap,
+  ) {
+    return GestureDetector(
+      onTap: onTap,
+      behavior: HitTestBehavior.opaque,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, color: isActive ? _green : _textGray, size: 24),
+          const SizedBox(height: 3),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              color: isActive ? _green : _textGray,
+              fontWeight: isActive ? FontWeight.w600 : FontWeight.w400,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 
@@ -609,56 +645,5 @@ class _HistoryScreenState extends State<HistoryScreen>
     } catch (e) {
       debugPrint('Error deleting quiz: $e');
     }
-  }
-
-  Future<void> _showDeleteAllDialog() async {
-    return showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-        title: const Text(
-          'Clear History',
-          style: TextStyle(fontWeight: FontWeight.w700),
-        ),
-        content: const Text(
-          'Are you sure you want to delete all quiz history?',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: Text('Cancel', style: TextStyle(color: _textGray)),
-          ),
-          TextButton(
-            onPressed: () async {
-              Navigator.pop(context);
-              try {
-                final batch = FirebaseFirestore.instance.batch();
-                final snapshot = await FirebaseFirestore.instance
-                    .collection('users')
-                    .doc(user!.uid)
-                    .collection('quiz_history')
-                    .get();
-                for (var doc in snapshot.docs) {
-                  batch.delete(doc.reference);
-                }
-                await batch.commit();
-                if (mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(
-                      content: Text('All history deleted'),
-                      backgroundColor: Colors.orange,
-                    ),
-                  );
-                }
-              } catch (e) {
-                debugPrint('Error deleting all: $e');
-              }
-            },
-            style: TextButton.styleFrom(foregroundColor: Colors.red),
-            child: const Text('Delete All'),
-          ),
-        ],
-      ),
-    );
   }
 }
