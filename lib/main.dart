@@ -7,17 +7,23 @@ import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
+import 'package:intl/intl.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import 'auth_screen.dart';
 import 'features/flashcards/flashcard_screen.dart';
 import 'history_screen.dart';
+import 'login_success_screen.dart';
 import 'models/chat_message.dart';
 import 'models/quiz_history.dart';
 import 'models/quiz_question.dart';
 import 'quiz_screen.dart';
+
+// Used to signal a freshlogin so the success screen is shown
+bool kShowLoginSuccess = false;
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -52,6 +58,10 @@ class MyApp extends StatelessWidget {
             User? user = snapshot.data;
             if (user == null) {
               return const AuthScreen();
+            }
+            if (kShowLoginSuccess) {
+              kShowLoginSuccess = false;
+              return const LoginSuccessScreen();
             }
             return const HomeScreen();
           }
@@ -107,6 +117,13 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   static const Color _cardWhite = Colors.white;
   static const Color _textDark = Color(0xFF1A1A2E);
   static const Color _textGray = Color(0xFF8E8E93);
+  static const Color _textGrayLight = Color(0xFFC7C7CC);
+
+  // Profile Stats
+  int _totalQuizzes = 0;
+  double _avgScore = 0;
+  int _streakDays = 0;
+  Map<DateTime, int> _activityMap = {};
 
   @override
   void initState() {
@@ -128,6 +145,66 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     );
 
     _loadRecentSessions();
+    _loadProfileStats();
+  }
+
+  Future<void> _loadProfileStats() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('quiz_history')
+          .get();
+
+      int total = snapshot.docs.length;
+      double avg = 0;
+      Map<DateTime, int> activity = {};
+
+      if (total > 0) {
+        double totalScorePercent = 0;
+        for (var doc in snapshot.docs) {
+          final data = doc.data();
+          final score = data['score'] as int? ?? 0;
+          final totalQ = data['totalQuestions'] as int? ?? 1;
+          totalScorePercent += (score / totalQ);
+
+          final dateStr = data['date'] as String?;
+          if (dateStr != null) {
+            final dateObj = DateTime.parse(dateStr);
+            final day = DateTime(dateObj.year, dateObj.month, dateObj.day);
+            activity[day] = (activity[day] ?? 0) + 1;
+          }
+        }
+        avg = (totalScorePercent / total) * 100;
+      }
+
+      // Robust streak calculation
+      int streak = 0;
+      DateTime checkDate = DateTime.now();
+      checkDate = DateTime(checkDate.year, checkDate.month, checkDate.day);
+
+      // If no activity today, check yesterday to see if streak is still alive
+      if (!activity.containsKey(checkDate)) {
+        checkDate = checkDate.subtract(const Duration(days: 1));
+      }
+
+      while (activity.containsKey(checkDate)) {
+        streak++;
+        checkDate = checkDate.subtract(const Duration(days: 1));
+      }
+
+      setState(() {
+        _totalQuizzes = total;
+        _avgScore = avg;
+        _streakDays = streak;
+        _activityMap = activity;
+      });
+    } catch (e) {
+      debugPrint('Error loading profile stats: $e');
+    }
   }
 
   Future<void> _loadRecentSessions() async {
@@ -146,10 +223,14 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       setState(() {
         _recentSessions = snapshot.docs.map((doc) {
           final data = doc.data();
+          final dateStr = data['date'] as String?;
+          final dateObj = dateStr != null
+              ? DateTime.parse(dateStr)
+              : DateTime.now();
           return {
             'id': doc.id,
             'title': data['pdfName'] ?? 'Untitled',
-            'date': (data['date'] as Timestamp).toDate(),
+            'date': dateObj,
             'score': data['score'] ?? 0,
             'total': data['totalQuestions'] ?? 0,
           };
@@ -168,7 +249,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     super.dispose();
   }
 
-  Future<void> _pickAndReadPDF() async {
+  Future<void> _pickAndReadPDF({Future<void> Function()? onComplete}) async {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
@@ -200,7 +281,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         setState(() {
           _extractedText = text;
           _isLoading = false;
+          _bottomNavIndex = 2; // Switch to AI Tools tab
         });
+
+        if (onComplete != null) {
+          await onComplete();
+        }
       } else {
         setState(() {
           _selectedFileName = "No file selected";
@@ -269,8 +355,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       }
 
       String prompt =
-          '''Please provide a clear and concise summary of the following text. 
-Focus on the main points and key ideas:\n\n$textToSummarize\n\nSummary:''';
+          '''Please provide a structured summary of the following text using these exact section headers:
+[TL;DR]
+(A concise, high-impact paragraph summarizing the core message)
+
+[KEY_POINTS]
+(3-5 critical bullet points using •)
+
+[DETAILED_ANALYSIS]
+(A deeper dive into the technical or conceptual details)
+
+Text to analyze:
+$textToSummarize''';
 
       final requestBody = {
         "contents": [
@@ -299,7 +395,7 @@ Focus on the main points and key ideas:\n\n$textToSummarize\n\nSummary:''';
           _isGeneratingSummary = false;
         });
 
-        _tabController.animateTo(1);
+        _tabController.animateTo(0);
 
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -332,7 +428,7 @@ Focus on the main points and key ideas:\n\n$textToSummarize\n\nSummary:''';
     }
   }
 
-  Future<void> _generateQuiz() async {
+  Future<void> _generateQuiz({int count = 5}) async {
     if (_extractedText.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please extract text from a PDF first')),
@@ -361,7 +457,7 @@ Focus on the main points and key ideas:\n\n$textToSummarize\n\nSummary:''';
       }
 
       String prompt =
-          '''Based on the following text, generate 5 multiple choice quiz questions.
+          '''Based on the following text, generate $count multiple choice quiz questions.
 Each question should have 4 options (A, B, C, D) with exactly one correct answer.
 Include a brief explanation for why the correct answer is right.
 
@@ -484,6 +580,164 @@ JSON RESPONSE:''';
         ),
       );
     }
+  }
+
+  Future<void> _showQuizConfigSheet() async {
+    int selectedCount = 5;
+    return showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+          ),
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 24),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const Row(
+                children: [
+                  Icon(Icons.quiz_rounded, color: _green, size: 28),
+                  SizedBox(width: 12),
+                  Text(
+                    'Quiz Settings',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: _textDark,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Number of Questions',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: _textDark,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Choose how many questions you want to solve (1-15)',
+                  style: TextStyle(fontSize: 13, color: _textGray),
+                ),
+              ),
+              const SizedBox(height: 32),
+              // Question Count Selector
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildCountButton(setSheetState, selectedCount, (val) {
+                    setSheetState(() => selectedCount = val);
+                  }),
+                  Text(
+                    '$selectedCount',
+                    style: const TextStyle(
+                      fontSize: 48,
+                      fontWeight: FontWeight.w900,
+                      color: _green,
+                    ),
+                  ),
+                  _buildCountButton(setSheetState, selectedCount, (val) {
+                    setSheetState(() => selectedCount = val);
+                  }, isAdd: true),
+                ],
+              ),
+              const SizedBox(height: 16),
+              SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  activeTrackColor: _green,
+                  inactiveTrackColor: _green.withOpacity(0.1),
+                  thumbColor: _green,
+                  overlayColor: _green.withOpacity(0.2),
+                  valueIndicatorColor: _textDark,
+                  trackHeight: 6,
+                ),
+                child: Slider(
+                  value: selectedCount.toDouble(),
+                  min: 1,
+                  max: 15,
+                  divisions: 14,
+                  label: selectedCount.toString(),
+                  onChanged: (val) {
+                    setSheetState(() => selectedCount = val.toInt());
+                  },
+                ),
+              ),
+              const SizedBox(height: 40),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _generateQuiz(count: selectedCount);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _green,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: const Text(
+                    'Start Generating',
+                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCountButton(
+    void Function(void Function()) setSheetState,
+    int current,
+    void Function(int) onChanged, {
+    bool isAdd = false,
+  }) {
+    bool disabled = isAdd ? current >= 15 : current <= 1;
+    return GestureDetector(
+      onTap: disabled
+          ? null
+          : () => onChanged(isAdd ? current + 1 : current - 1),
+      child: Container(
+        width: 50,
+        height: 50,
+        decoration: BoxDecoration(
+          color: disabled ? Colors.grey.shade100 : _green.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(15),
+        ),
+        child: Icon(
+          isAdd ? Icons.add_rounded : Icons.remove_rounded,
+          color: disabled ? Colors.grey.shade300 : _green,
+          size: 28,
+        ),
+      ),
+    );
   }
 
   Future<void> _sendMessage() async {
@@ -664,6 +918,8 @@ ANSWER (be concise but helpful):''';
       _lastQuizId = history.id;
 
       if (mounted) {
+        _loadProfileStats(); // Refresh stats immediately
+        _loadRecentSessions(); // Refresh recent sessions
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('✅ Quiz saved to history!'),
@@ -701,25 +957,7 @@ ANSWER (be concise but helpful):''';
     });
   }
 
-  void _clearAll() {
-    setState(() {
-      _selectedFileName = "No file selected";
-      _extractedText = "";
-      _summary = "";
-      _quizQuestions = [];
-      _showQuizResults = false;
-      _chatMessages.clear();
-      _chatMessages.add(
-        ChatMessage(
-          text:
-              "👋 Hi! I'm your AI study assistant. Ask me anything about your document!",
-          isUser: false,
-          timestamp: DateTime.now(),
-        ),
-      );
-    });
-    _tabController.animateTo(0);
-  }
+
 
   String _formatTimeAgo(DateTime date) {
     final now = DateTime.now();
@@ -750,15 +988,398 @@ ANSWER (be concise but helpful):''';
             : Column(
                 children: [
                   _buildHeader(displayName),
-                  Expanded(
-                    child: _extractedText.isEmpty
-                        ? _buildEmptyState()
-                        : _buildDocumentView(),
-                  ),
+                  Expanded(child: _buildBody()),
                 ],
               ),
       ),
       bottomNavigationBar: _buildBottomNav(),
+    );
+  }
+
+  Widget _buildBody() {
+    switch (_bottomNavIndex) {
+      case 0:
+        return _buildEmptyState();
+      case 1:
+        return HistoryScreen(
+          isTab: true,
+          onTabChange: (index) => setState(() => _bottomNavIndex = index),
+        );
+      case 2:
+        return _extractedText.isEmpty
+            ? Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.auto_fix_high_rounded,
+                      size: 64,
+                      color: Colors.grey.shade300,
+                    ),
+                    const SizedBox(height: 16),
+                    Text(
+                      'Upload a PDF on the Home tab\nto use AI Tools',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(color: _textGray, fontSize: 15),
+                    ),
+                  ],
+                ),
+              )
+            : (_isGeneratingSummary || _isGeneratingQuiz)
+                ? _buildSkeletonLoader()
+                : _buildDocumentView();
+      case 3:
+        return _buildProfileTab();
+      default:
+        return _buildEmptyState();
+    }
+  }
+
+
+  Widget _buildSkeletonLoader() {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Simulated Tab Bar
+          Row(
+            children: List.generate(4, (i) => Expanded(
+              child: Container(
+                height: 36,
+                margin: const EdgeInsets.only(right: 8),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade200,
+                  borderRadius: BorderRadius.circular(18),
+                ),
+              ),
+            )),
+          ),
+          const SizedBox(height: 30),
+          // Large main card skeleton
+          Container(
+            height: 200,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              color: Colors.grey.shade100,
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Center(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                   SizedBox(
+                    width: 32,
+                    height: 32,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: _green,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    'AI is processing your content...',
+                    style: TextStyle(
+                      color: _textGray,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+          // List item skeletons
+          ...List.generate(3, (i) => Container(
+            margin: const EdgeInsets.only(bottom: 16),
+            padding: const EdgeInsets.all(16),
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.grey.shade100),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade100,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(
+                        height: 14,
+                        width: 140,
+                        color: Colors.grey.shade100,
+                      ),
+                      const SizedBox(height: 8),
+                      Container(
+                        height: 10,
+                        width: double.infinity,
+                        color: Colors.grey.shade50,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          )),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildProfileTab() {
+    final user = FirebaseAuth.instance.currentUser;
+    final email = user?.email ?? 'user@example.com';
+    final name = email.split('@').first.toUpperCase();
+
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(20),
+      child: Column(
+        children: [
+          // Profile Header
+          Container(
+            padding: const EdgeInsets.all(24),
+            decoration: BoxDecoration(
+              color: _cardWhite,
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.04),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Column(
+              children: [
+                CircleAvatar(
+                  radius: 45,
+                  backgroundColor: _green.withOpacity(0.1),
+                  child: const Icon(Icons.person, size: 50, color: _green),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  name,
+                  style: const TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                Text(email, style: TextStyle(color: _textGray, fontSize: 14)),
+                const SizedBox(height: 24),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceAround,
+                  children: [
+                    _buildStatItem('$_totalQuizzes', 'Quizzes'),
+                    _buildStatItem('${_avgScore.round()}%', 'Avg Score'),
+                    _buildStatItem('$_streakDays', 'Day Streak'),
+                  ],
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          // Activity Graph Section
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              color: _cardWhite,
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.04),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'STUDY CONSISTENCY',
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w700,
+                    color: _textGray,
+                    letterSpacing: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 16),
+                _buildActivityGraph(),
+              ],
+            ),
+          ),
+          const SizedBox(height: 20),
+          // Actions
+          _buildProfileAction(Icons.settings_outlined, 'Settings', () {}),
+          _buildProfileAction(Icons.help_outline, 'Help Center', () {}),
+          _buildProfileAction(Icons.logout, 'Log out', () async {
+            await FirebaseAuth.instance.signOut();
+          }, color: Colors.red),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatItem(String value, String label) {
+    return Column(
+      children: [
+        Text(
+          value,
+          style: const TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w700,
+            color: _textDark,
+          ),
+        ),
+        Text(label, style: TextStyle(fontSize: 12, color: _textGray)),
+      ],
+    );
+  }
+
+  Widget _buildProfileAction(
+    IconData icon,
+    String label,
+    VoidCallback onTap, {
+    Color? color,
+  }) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+          decoration: BoxDecoration(
+            color: _cardWhite,
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Row(
+            children: [
+              Icon(icon, color: color ?? _textDark, size: 22),
+              const SizedBox(width: 16),
+              Text(
+                label,
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w600,
+                  color: color ?? _textDark,
+                ),
+              ),
+              const Spacer(),
+              Icon(
+                Icons.chevron_right,
+                color: color?.withOpacity(0.5) ?? _textGray,
+                size: 20,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildActivityGraph() {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+
+    // Calculate the start of the grid (12 weeks ago, aligned to Sunday)
+    final startDate = today.subtract(
+      Duration(days: today.weekday % 7 + (11 * 7)),
+    );
+
+    return Column(
+      children: [
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          reverse: true, // Show most recent on the right
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: List.generate(12, (weekIndex) {
+              final weekStart = startDate.add(Duration(days: weekIndex * 7));
+              return Container(
+                margin: const EdgeInsets.symmetric(horizontal: 1.5),
+                child: Column(
+                  children: List.generate(7, (dayIndex) {
+                    final date = weekStart.add(Duration(days: dayIndex));
+                    final count =
+                        _activityMap[DateTime(
+                          date.year,
+                          date.month,
+                          date.day,
+                        )] ??
+                        0;
+
+                    // GitHub-like color intensity
+                    Color cellColor;
+                    if (date.isAfter(today)) {
+                      cellColor = Colors.transparent; // Future dates
+                    } else if (count == 0) {
+                      cellColor = const Color(0xFFEBEDF0);
+                    } else if (count == 1) {
+                      cellColor = _green.withOpacity(0.3);
+                    } else if (count <= 3) {
+                      cellColor = _green.withOpacity(0.6);
+                    } else {
+                      cellColor = _green;
+                    }
+
+                    return Container(
+                      width: 12,
+                      height: 12,
+                      margin: const EdgeInsets.symmetric(vertical: 1.5),
+                      decoration: BoxDecoration(
+                        color: cellColor,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    );
+                  }),
+                ),
+              );
+            }),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.end,
+          children: [
+            const Text(
+              'Less ',
+              style: TextStyle(fontSize: 10, color: _textGray),
+            ),
+            _buildLegendBox(const Color(0xFFEBEDF0)),
+            _buildLegendBox(_green.withOpacity(0.3)),
+            _buildLegendBox(_green.withOpacity(0.6)),
+            _buildLegendBox(_green),
+            const Text(
+              ' More',
+              style: TextStyle(fontSize: 10, color: _textGray),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildLegendBox(Color color) {
+    return Container(
+      width: 10,
+      height: 10,
+      margin: const EdgeInsets.symmetric(horizontal: 2),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(1.5),
+      ),
     );
   }
 
@@ -787,78 +1408,79 @@ ANSWER (be concise but helpful):''';
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Row(
-                children: [
-                  // Avatar
-                  Container(
-                    width: 42,
-                    height: 42,
-                    decoration: BoxDecoration(
-                      color: Colors.orange.shade300,
-                      shape: BoxShape.circle,
-                    ),
-                    child: Center(
-                      child: Text(
-                        displayName[0].toUpperCase(),
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontWeight: FontWeight.bold,
-                          fontSize: 18,
+          if (_bottomNavIndex == 0)
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Row(
+                  children: [
+                    // Avatar
+                    Container(
+                      width: 42,
+                      height: 42,
+                      decoration: BoxDecoration(
+                        color: Colors.orange.shade300,
+                        shape: BoxShape.circle,
+                      ),
+                      child: Center(
+                        child: Text(
+                          displayName[0].toUpperCase(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontWeight: FontWeight.bold,
+                            fontSize: 18,
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 12),
-                  Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Welcome back,',
-                        style: TextStyle(fontSize: 12, color: _textGray),
-                      ),
-                      Text(
-                        displayName,
-                        style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          color: _textDark,
+                    const SizedBox(width: 12),
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'Welcome back,',
+                          style: TextStyle(fontSize: 12, color: _textGray),
                         ),
+                        Text(
+                          displayName,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            color: _textDark,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+                Row(
+                  children: [
+                    IconButton(
+                      icon: Icon(
+                        Icons.notifications_none_rounded,
+                        color: _textDark,
+                        size: 26,
                       ),
-                    ],
-                  ),
-                ],
-              ),
-              Row(
-                children: [
-                  IconButton(
-                    icon: Icon(
-                      Icons.notifications_none_rounded,
-                      color: _textDark,
-                      size: 26,
+                      onPressed: () {},
                     ),
-                    onPressed: () {},
-                  ),
-                  IconButton(
-                    icon: Icon(
-                      Icons.logout_rounded,
-                      color: Colors.red.shade400,
-                      size: 22,
+                    IconButton(
+                      icon: Icon(
+                        Icons.logout_rounded,
+                        color: Colors.red.shade400,
+                        size: 22,
+                      ),
+                      onPressed: () async =>
+                          await FirebaseAuth.instance.signOut(),
+                      tooltip: 'Logout',
                     ),
-                    onPressed: () async =>
-                        await FirebaseAuth.instance.signOut(),
-                    tooltip: 'Logout',
-                  ),
-                ],
-              ),
-            ],
-          ),
+                  ],
+                ),
+              ],
+            ),
           const SizedBox(height: 16),
-          const Text(
-            'Study Buddy AI',
-            style: TextStyle(
+          Text(
+            _getHeaderTitle(),
+            style: const TextStyle(
               fontSize: 28,
               fontWeight: FontWeight.w800,
               color: _textDark,
@@ -866,74 +1488,133 @@ ANSWER (be concise but helpful):''';
             ),
           ),
           const SizedBox(height: 14),
-          // Pill Tab Bar
-          _buildPillTabBar(),
-          const SizedBox(height: 16),
+          // Pill Tab Bar - Only show on AI Tools tab
+          if (_bottomNavIndex == 2) _buildPillTabBar(),
+          if (_bottomNavIndex == 2) const SizedBox(height: 16),
         ],
       ),
     );
   }
 
+  String _getHeaderTitle() {
+    switch (_bottomNavIndex) {
+      case 0:
+        return "Study Buddy AI";
+      case 1:
+        return "Study History";
+      case 2:
+        return "AI Study Tools";
+      case 3:
+        return "My Profile";
+      default:
+        return "Study Buddy AI";
+    }
+  }
+
   Widget _buildPillTabBar() {
-    // Show tabs relevant to state
-    final tabs = _extractedText.isEmpty
-        ? ['Text', 'Summary', 'Quiz']
-        : ['Text', 'Summary', 'Quiz', 'Chat'];
+    final tabs = ['Summary', 'Quiz', 'Chat', 'Flashcards'];
+    final icons = [
+      Icons.auto_awesome_outlined,
+      Icons.quiz_outlined,
+      Icons.chat_outlined,
+      Icons.auto_stories_outlined,
+    ];
 
     return Container(
-      height: 42,
+      height: 48,
       decoration: BoxDecoration(
         color: const Color(0xFFE8E8ED),
         borderRadius: BorderRadius.circular(30),
       ),
-      child: Row(
-        children: List.generate(tabs.length, (i) {
-          final isSelected = _currentTabIndex == i;
-          return Expanded(
-            child: GestureDetector(
-              onTap: () {
-                if (_extractedText.isNotEmpty) {
-                  _tabController.animateTo(i);
-                }
-              },
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                margin: const EdgeInsets.all(4),
-                decoration: BoxDecoration(
-                  color: isSelected ? _textDark : Colors.transparent,
-                  borderRadius: BorderRadius.circular(24),
+      clipBehavior: Clip.antiAlias,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final tabWidth = constraints.maxWidth / tabs.length;
+          return Stack(
+            children: [
+              // Sliding Indicator
+              AnimatedAlign(
+                duration: const Duration(milliseconds: 350),
+                curve: Curves.easeInOutCubic,
+                alignment: Alignment(
+                  -1.0 + (_currentTabIndex * (2.0 / (tabs.length - 1))),
+                  0.0,
                 ),
-                child: Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      i == 0
-                          ? Icons.text_snippet_outlined
-                          : i == 1
-                          ? Icons.auto_awesome_outlined
-                          : i == 2
-                          ? Icons.quiz_outlined
-                          : Icons.chat_outlined,
-                      size: 14,
-                      color: isSelected ? Colors.white : _textGray,
-                    ),
-                    const SizedBox(width: 4),
-                    Text(
-                      tabs[i],
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: isSelected
-                            ? FontWeight.w600
-                            : FontWeight.w400,
-                        color: isSelected ? Colors.white : _textGray,
+                child: Container(
+                  width: tabWidth,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    color: _textDark,
+                    borderRadius: BorderRadius.circular(30),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.15),
+                        blurRadius: 8,
+                        offset: const Offset(0, 2),
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
                 ),
               ),
-            ),
+              // Tab Items
+              Row(
+                children: List.generate(tabs.length, (i) {
+                  final isSelected = _currentTabIndex == i;
+                  return Expanded(
+                    child: GestureDetector(
+                      onTap: () {
+                        if (_extractedText.isEmpty && i != 0) return;
+
+                        HapticFeedback.selectionClick();
+                        _tabController.animateTo(i);
+
+                        if (i == 0 &&
+                            _summary.isEmpty &&
+                            !_isGeneratingSummary) {
+                          _generateSummary();
+                        } else if (i == 1 &&
+                            _quizQuestions.isEmpty &&
+                            !_isGeneratingQuiz) {
+                          _showQuizConfigSheet();
+                        }
+                      },
+                      behavior: HitTestBehavior.opaque,
+                      child: Center(
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            AnimatedDefaultTextStyle(
+                              duration: const Duration(milliseconds: 300),
+                              style: TextStyle(
+                                color: isSelected ? Colors.white : _textGray,
+                              ),
+                              child: Icon(
+                                icons[i],
+                                size: 16,
+                                color: isSelected ? Colors.white : _textGray,
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Text(
+                              tabs[i],
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: isSelected
+                                    ? FontWeight.w700
+                                    : FontWeight.w500,
+                                color: isSelected ? Colors.white : _textGray,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  );
+                }),
+              ),
+            ],
           );
-        }),
+        },
       ),
     );
   }
@@ -1049,7 +1730,7 @@ ANSWER (be concise but helpful):''';
               child: GestureDetector(
                 onTap: _extractedText.isNotEmpty && !_isGeneratingSummary
                     ? _generateSummary
-                    : _pickAndReadPDF,
+                    : () => _pickAndReadPDF(onComplete: _generateSummary),
                 child: Container(
                   height: 110,
                   decoration: BoxDecoration(
@@ -1093,8 +1774,8 @@ ANSWER (be concise but helpful):''';
             Expanded(
               child: GestureDetector(
                 onTap: _extractedText.isNotEmpty && !_isGeneratingQuiz
-                    ? _generateQuiz
-                    : _pickAndReadPDF,
+                    ? _showQuizConfigSheet
+                    : () => _pickAndReadPDF(onComplete: _showQuizConfigSheet),
                 child: Container(
                   height: 110,
                   decoration: BoxDecoration(
@@ -1152,30 +1833,62 @@ ANSWER (be concise but helpful):''';
                     ),
                   );
                 }
-              : null,
+              : () => _pickAndReadPDF(onComplete: () async {
+                  if (_extractedText.isNotEmpty) {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => FlashcardScreen(
+                          documentText: _extractedText,
+                          documentName: _selectedFileName,
+                        ),
+                      ),
+                    );
+                  }
+                }),
           child: Container(
             width: double.infinity,
-            height: 56,
+            height: 58,
             decoration: BoxDecoration(
-              color: const Color(0xFFEDEDED),
+              color: Colors.orange.shade400,
               borderRadius: BorderRadius.circular(30),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.orange.shade400.withOpacity(0.2),
+                  blurRadius: 10,
+                  offset: const Offset(0, 4),
+                ),
+              ],
             ),
             child: Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [
-                Icon(
-                  Icons.auto_stories_outlined,
-                  color: _textDark.withOpacity(0.7),
-                  size: 22,
+                Container(
+                  padding: const EdgeInsets.all(6),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withOpacity(0.2),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.auto_stories_rounded,
+                    color: Colors.white,
+                    size: 18,
+                  ),
                 ),
-                const SizedBox(width: 10),
-                Text(
+                const SizedBox(width: 12),
+                const Text(
                   'Study Flashcards',
                   style: TextStyle(
-                    color: _textDark.withOpacity(0.85),
-                    fontWeight: FontWeight.w600,
-                    fontSize: 15,
+                    color: Colors.white,
+                    fontWeight: FontWeight.w700,
+                    fontSize: 16,
                   ),
+                ),
+                const SizedBox(width: 8),
+                const Icon(
+                  Icons.arrow_forward_rounded,
+                  color: Colors.white70,
+                  size: 16,
                 ),
               ],
             ),
@@ -1345,153 +2058,371 @@ ANSWER (be concise but helpful):''';
   Widget _buildDocumentView() {
     return Column(
       children: [
-        // Action chips when doc loaded
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20),
-          child: _buildLoadedActionButtons(),
-        ),
-        const SizedBox(height: 12),
         Expanded(
           child: TabBarView(
             controller: _tabController,
             children: [
-              _buildTextTab(),
               _buildSummaryTab(),
               _buildQuizTabView(),
               _buildChatTab(),
+              _buildFlashcardsTab(),
             ],
           ),
         ),
-        _buildChatInputBar(),
+        if (_currentTabIndex == 2) _buildChatInputBar(),
       ],
     );
   }
 
-  Widget _buildLoadedActionButtons() {
-    return Row(
-      children: [
-        Expanded(
-          child: _buildSmallActionChip(
-            Icons.summarize_outlined,
-            'Summary',
-            _green,
-            _isGeneratingSummary ? null : _generateSummary,
-            _isGeneratingSummary,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _buildSmallActionChip(
-            Icons.quiz_outlined,
-            'Quiz',
-            _darkNavy,
-            _isGeneratingQuiz ? null : _generateQuiz,
-            _isGeneratingQuiz,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _buildSmallActionChip(
-            Icons.auto_stories_outlined,
-            'Cards',
-            Colors.purple,
-            () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => FlashcardScreen(
-                    documentText: _extractedText,
-                    documentName: _selectedFileName,
-                  ),
-                ),
-              );
-            },
-            false,
-          ),
-        ),
-      ],
-    );
-  }
+  // Widget _buildLoadedActionButtons() {
+  //   return Row(
+  //     children: [
+  //       Expanded(
+  //         child: _buildSmallActionChip(
+  //           Icons.summarize_outlined,
+  //           'Summary',
+  //           _green,
+  //           _isGeneratingSummary ? null : _generateSummary,
+  //           _isGeneratingSummary,
+  //         ),
+  //       ),
+  //       const SizedBox(width: 10),
+  //       Expanded(
+  //         child: _buildSmallActionChip(
+  //           Icons.quiz_outlined,
+  //           'Quiz',
+  //           _darkNavy,
+  //           _isGeneratingQuiz ? null : _generateQuiz,
+  //           _isGeneratingQuiz,
+  //         ),
+  //       ),
+  //       const SizedBox(width: 10),
+  //       Expanded(
+  //         child: _buildSmallActionChip(
+  //           Icons.auto_stories_outlined,
+  //           'Cards',
+  //           Colors.purple,
+  //           () {
+  //             Navigator.push(
+  //               context,
+  //               MaterialPageRoute(
+  //                 builder: (context) => FlashcardScreen(
+  //                   documentText: _extractedText,
+  //                   documentName: _selectedFileName,
+  //                 ),
+  //               ),
+  //             );
+  //           },
+  //           false,
+  //         ),
+  //       ),
+  //     ],
+  //   );
+  // }
 
-  Widget _buildSmallActionChip(
-    IconData icon,
-    String label,
-    Color color,
-    VoidCallback? onTap,
-    bool loading,
-  ) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(vertical: 10),
-        decoration: BoxDecoration(
-          color: color.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: color.withOpacity(0.25)),
-        ),
-        child: Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            if (loading)
-              SizedBox(
-                width: 14,
-                height: 14,
-                child: CircularProgressIndicator(strokeWidth: 2, color: color),
-              )
-            else
-              Icon(icon, color: color, size: 16),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                color: color,
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  // Widget _buildSmallActionChip(
+  //   IconData icon,
+  //   String label,
+  //   Color color,
+  //   VoidCallback? onTap,
+  //   bool loading,
+  // ) {
+  //   return GestureDetector(
+  //     onTap: onTap,
+  //     child: Container(
+  //       padding: const EdgeInsets.symmetric(vertical: 10),
+  //       decoration: BoxDecoration(
+  //         color: color.withOpacity(0.1),
+  //         borderRadius: BorderRadius.circular(12),
+  //         border: Border.all(color: color.withOpacity(0.25)),
+  //       ),
+  //       child: Row(
+  //         mainAxisAlignment: MainAxisAlignment.center,
+  //         children: [
+  //           if (loading)
+  //             SizedBox(
+  //               width: 14,
+  //               height: 14,
+  //               child: CircularProgressIndicator(strokeWidth: 2, color: color),
+  //             )
+  //           else
+  //             Icon(icon, color: color, size: 16),
+  //           const SizedBox(width: 6),
+  //           Text(
+  //             label,
+  //             style: TextStyle(
+  //               color: color,
+  //               fontSize: 12,
+  //               fontWeight: FontWeight.w600,
+  //             ),
+  //           ),
+  //         ],
+  //       ),
+  //     ),
+  //   );
+  // }
 
-  Widget _buildTextTab() {
+  Widget _buildFlashcardsTab() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: _cardWhite,
-          borderRadius: BorderRadius.circular(16),
-        ),
-        child: Text(
-          _extractedText,
-          style: const TextStyle(fontSize: 14, height: 1.6),
-        ),
+      child: Column(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(32),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF3E8FF),
+              shape: BoxShape.circle,
+            ),
+            child: const Icon(
+              Icons.auto_stories_rounded,
+              size: 64,
+              color: Colors.purple,
+            ),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            'Master your Document',
+            style: TextStyle(
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+              color: _textDark,
+            ),
+          ),
+          const SizedBox(height: 10),
+          Text(
+            'Generate interactive flashcards from your PDF\nto memorize key concepts faster.',
+            textAlign: TextAlign.center,
+            style: TextStyle(color: _textGray, height: 1.5),
+          ),
+          const SizedBox(height: 32),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: () {
+                Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => FlashcardScreen(
+                      documentText: _extractedText,
+                      documentName: _selectedFileName,
+                    ),
+                  ),
+                );
+              },
+              icon: const Icon(Icons.bolt_rounded),
+              label: const Text('GENERATE FLASHCARDS'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.purple,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                elevation: 0,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
   Widget _buildSummaryTab() {
+    if (_summary.isEmpty) {
+      return Center(
+        child: Padding(
+          padding: const EdgeInsets.all(40),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(Icons.auto_awesome, size: 64, color: Colors.grey.shade300),
+              const SizedBox(height: 16),
+              Text(
+                'Tap "Summarize" above to generate a premium analysis',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: _textGray),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // Parse the structured summary
+    String tldr = "";
+    String keyPoints = "";
+    String analysis = "";
+
+    try {
+      if (_summary.contains('[TL;DR]')) {
+        tldr = _summary.split('[TL;DR]')[1].split('[')[0].trim();
+      }
+      if (_summary.contains('[KEY_POINTS]')) {
+        keyPoints = _summary.split('[KEY_POINTS]')[1].split('[')[0].trim();
+      }
+      if (_summary.contains('[DETAILED_ANALYSIS]')) {
+        analysis = _summary.split('[DETAILED_ANALYSIS]')[1].trim();
+      }
+    } catch (e) {
+      tldr = _summary; // Fallback to raw text if parsing fails
+    }
+
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _buildSummarySection(
+            'Quick Summary',
+            tldr,
+            Icons.bolt_rounded,
+            _green.withOpacity(0.1),
+            _green,
+          ),
+          const SizedBox(height: 16),
+          if (keyPoints.isNotEmpty) ...[
+            _buildSummarySection(
+              'Key Insights',
+              keyPoints,
+              Icons.auto_awesome_mosaic_rounded,
+              const Color(0xFF3B82F6).withOpacity(0.1),
+              const Color(0xFF3B82F6),
+            ),
+            const SizedBox(height: 16),
+          ],
+          if (analysis.isNotEmpty) ...[
+            _buildSummarySection(
+              'Detailed Analysis',
+              analysis,
+              Icons.analytics_outlined,
+              const Color(0xFF8B5CF6).withOpacity(0.1),
+              const Color(0xFF8B5CF6),
+            ),
+            const SizedBox(height: 24),
+          ],
+          // Action Buttons
+          Row(
+            children: [
+              Expanded(
+                child: _buildSummaryActionButton(
+                  'Copy Analysis',
+                  Icons.copy_rounded,
+                  () {
+                    Clipboard.setData(ClipboardData(text: _summary));
+                    HapticFeedback.lightImpact();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Copied to clipboard')),
+                    );
+                  },
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: _buildSummaryActionButton(
+                  'Regenerate',
+                  Icons.refresh_rounded,
+                  () {
+                    HapticFeedback.mediumImpact();
+                    _generateSummary();
+                  },
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 100), // Space for bottom padding
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummarySection(
+    String title,
+    String content,
+    IconData icon,
+    Color bgColor,
+    Color accentColor,
+  ) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: _cardWhite,
+        borderRadius: BorderRadius.circular(20),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.03),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: BoxDecoration(
+                  color: bgColor,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Icon(icon, color: accentColor, size: 20),
+              ),
+              const SizedBox(width: 12),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.w700,
+                  color: _textDark,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 14),
+          Text(
+            content,
+            style: TextStyle(
+              fontSize: 14,
+              height: 1.6,
+              color: _textDark.withOpacity(0.85),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummaryActionButton(
+    String label,
+    IconData icon,
+    VoidCallback onTap,
+  ) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(16),
       child: Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.symmetric(vertical: 14),
         decoration: BoxDecoration(
-          color: _cardWhite,
+          border: Border.all(color: Colors.grey.shade200),
           borderRadius: BorderRadius.circular(16),
         ),
-        child: _summary.isEmpty
-            ? Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(40),
-                  child: Text(
-                    'Tap "Summary" above to generate a summary',
-                    style: TextStyle(color: _textGray),
-                  ),
-                ),
-              )
-            : Text(_summary, style: const TextStyle(fontSize: 14, height: 1.6)),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(icon, size: 18, color: _textGray),
+            const SizedBox(width: 8),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                color: _textDark.withOpacity(0.8),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1711,14 +2642,9 @@ ANSWER (be concise but helpful):''';
             onTap: () {
               setState(() => _bottomNavIndex = i);
               if (i == 0) {
-                // Already on home
-              } else if (i == 1) {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => const HistoryScreen(),
-                  ),
-                );
+                _loadRecentSessions();
+              } else if (i == 3) {
+                _loadProfileStats();
               }
             },
             behavior: HitTestBehavior.opaque,
@@ -1756,301 +2682,427 @@ ANSWER (be concise but helpful):''';
     return Column(
       children: [
         if (_showQuizResults)
-          Container(
-            margin: const EdgeInsets.only(bottom: 16),
-            padding: const EdgeInsets.all(20),
-            decoration: BoxDecoration(
-              color: _cardWhite,
-              borderRadius: BorderRadius.circular(16),
-              border: Border.all(color: Colors.orange.shade200),
-            ),
-            child: Column(
-              children: [
-                Text(
-                  'Quiz Complete!',
-                  style: TextStyle(
-                    fontSize: 24,
-                    fontWeight: FontWeight.bold,
-                    color: Colors.orange.shade700,
+          Column(
+            children: [
+              // Score Ring
+              Center(
+                child: Container(
+                  width: 200,
+                  height: 200,
+                  padding: const EdgeInsets.all(20),
+                  child: Stack(
+                    children: [
+                      Center(
+                        child: SizedBox(
+                          width: 160,
+                          height: 160,
+                          child: CircularProgressIndicator(
+                            value: _quizScore / _quizQuestions.length,
+                            strokeWidth: 12,
+                            backgroundColor: Colors.grey.shade100,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              _quizScore / _quizQuestions.length >= 0.7
+                                  ? _green
+                                  : Colors.orange,
+                            ),
+                            strokeCap: StrokeCap.round,
+                          ),
+                        ),
+                      ),
+                      Center(
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              '${((_quizScore / _quizQuestions.length) * 100).round()}',
+                              style: const TextStyle(
+                                fontSize: 48,
+                                fontWeight: FontWeight.w800,
+                                color: _textDark,
+                              ),
+                            ),
+                            Text(
+                              'SCORE',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: _textGray,
+                                letterSpacing: 1.2,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
                   ),
                 ),
-                const SizedBox(height: 8),
-                Text(
-                  'You scored $_quizScore/${_quizQuestions.length}',
-                  style: const TextStyle(fontSize: 18),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                _quizScore / _quizQuestions.length >= 0.7
+                    ? 'Excellent Work!'
+                    : 'Keep Practicing',
+                style: TextStyle(
+                  fontSize: 22,
+                  fontWeight: FontWeight.w800,
+                  color: _quizScore / _quizQuestions.length >= 0.7
+                      ? _green
+                      : Colors.red.shade600,
                 ),
-                const SizedBox(height: 16),
-                LinearProgressIndicator(
-                  value: _quizScore / _quizQuestions.length,
-                  backgroundColor: Colors.grey.shade200,
-                  valueColor: const AlwaysStoppedAnimation<Color>(
-                    Colors.orange,
+              ),
+              const SizedBox(height: 6),
+              Text(
+                'Review the material and try again.',
+                style: TextStyle(color: _textGray, fontSize: 14),
+              ),
+              const SizedBox(height: 24),
+
+              // Stats Pills
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  _buildResultPill(
+                    Icons.timer_outlined,
+                    '12m 45s',
+                    Colors.green,
                   ),
-                  minHeight: 10,
-                  borderRadius: BorderRadius.circular(5),
+                  const SizedBox(width: 12),
+                  _buildResultPill(
+                    Icons.check_circle_outline_rounded,
+                    '${((_quizScore / _quizQuestions.length) * 100).round()}% Accuracy',
+                    Colors.green,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+
+              // AI Insight Card
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFF1FDF4),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(color: _green.withOpacity(0.1)),
                 ),
-                const SizedBox(height: 16),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
+                child: Row(
                   children: [
-                    ElevatedButton.icon(
-                      onPressed: _resetQuiz,
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Try Again'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.orange,
-                        foregroundColor: Colors.white,
+                    Container(
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: _green.withOpacity(0.1),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.auto_awesome_rounded,
+                        color: _green,
+                        size: 20,
                       ),
                     ),
-                    const SizedBox(width: 12),
-                    OutlinedButton.icon(
-                      onPressed: _lastQuizId != null
-                          ? () {
-                              Navigator.push(
-                                context,
-                                MaterialPageRoute(
-                                  builder: (context) => QuizDetailsScreen(
-                                    history: QuizHistory(
-                                      id: _lastQuizId!,
-                                      userId:
-                                          FirebaseAuth
-                                              .instance
-                                              .currentUser
-                                              ?.uid ??
-                                          '',
-                                      date: DateTime.now(),
-                                      pdfName: _selectedFileName,
-                                      score: _quizScore,
-                                      totalQuestions: _quizQuestions.length,
-                                      questions: _quizQuestions
-                                          .map(
-                                            (q) => {
-                                              'question': q.question,
-                                              'options': q.options,
-                                              'userAnswer':
-                                                  q.selectedAnswerIndex,
-                                              'correctAnswer':
-                                                  q.correctAnswerIndex,
-                                              'isCorrect': q.isCorrect,
-                                              'explanation': q.explanation,
-                                            },
-                                          )
-                                          .toList(),
-                                    ),
-                                  ),
-                                ),
-                              );
-                            }
-                          : null,
-                      icon: const Icon(Icons.visibility),
-                      label: const Text('View Details'),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        SizedBox(
-          height: MediaQuery.of(context).size.height * 0.55,
-          child: ListView.builder(
-            padding: const EdgeInsets.all(4),
-            itemCount: _quizQuestions.length,
-            itemBuilder: (context, index) {
-              final question = _quizQuestions[index];
-              return Container(
-                margin: const EdgeInsets.only(bottom: 20),
-                decoration: BoxDecoration(
-                  color: _cardWhite,
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: _showQuizResults
-                        ? question.isCorrect
-                              ? Colors.green.shade200
-                              : Colors.red.shade200
-                        : Colors.grey.shade200,
-                  ),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Row(
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          Container(
-                            width: 28,
-                            height: 28,
-                            decoration: BoxDecoration(
-                              color: Colors.blue.shade100,
-                              shape: BoxShape.circle,
-                            ),
-                            child: Center(
-                              child: Text(
-                                '${index + 1}',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: Colors.blue.shade700,
-                                ),
-                              ),
+                          const Text(
+                            'AI Insight',
+                            style: TextStyle(
+                              fontWeight: FontWeight.w700,
+                              fontSize: 14,
+                              color: _textDark,
                             ),
                           ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              question.question,
-                              style: const TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                              ),
+                          const SizedBox(height: 4),
+                          Text(
+                            "You've shown good progress! Focus on ${(_quizQuestions.isNotEmpty ? _quizQuestions[0].question.split(' ').take(3).join(' ') : 'these topics')} in your next session.",
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: _textDark.withOpacity(0.7),
+                              height: 1.4,
                             ),
                           ),
                         ],
                       ),
-                      const SizedBox(height: 16),
-                      ...List.generate(question.options.length, (optIndex) {
-                        final isSelected =
-                            question.selectedAnswerIndex == optIndex;
-                        final isCorrect =
-                            question.correctAnswerIndex == optIndex;
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 32),
 
-                        Color? backgroundColor;
-                        Color? textColor;
-                        IconData? trailingIcon;
+              // Difficulty Analysis
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        'Difficulty Analysis',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w800,
+                          color: _textDark,
+                        ),
+                      ),
+                      Text(
+                        'GLOBAL AVG: 72%',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: _textGray.withOpacity(0.6),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
+                  _buildDifficultyRow('Foundational', 1.0, Colors.green),
+                  const SizedBox(height: 16),
+                  _buildDifficultyRow('Intermediate', 0.85, Colors.orange),
+                  const SizedBox(height: 16),
+                  _buildDifficultyRow('Advanced', 0.70, Colors.red),
+                ],
+              ),
+              const SizedBox(height: 40),
 
-                        if (_showQuizResults) {
-                          if (isCorrect) {
-                            backgroundColor = Colors.green.shade50;
-                            textColor = Colors.green.shade700;
-                            trailingIcon = Icons.check_circle;
-                          } else if (isSelected && !isCorrect) {
-                            backgroundColor = Colors.red.shade50;
-                            textColor = Colors.red.shade700;
-                            trailingIcon = Icons.cancel;
-                          }
-                        } else if (isSelected) {
-                          backgroundColor = Colors.blue.shade50;
-                          textColor = Colors.blue.shade700;
-                        }
-
-                        return GestureDetector(
-                          onTap: _showQuizResults
-                              ? null
-                              : () => _selectAnswer(index, optIndex),
-                          child: Container(
-                            margin: const EdgeInsets.only(bottom: 8),
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 12,
-                            ),
-                            decoration: BoxDecoration(
-                              color: backgroundColor ?? Colors.grey.shade50,
-                              borderRadius: BorderRadius.circular(8),
-                              border: Border.all(
-                                color: isSelected
-                                    ? Colors.blue.shade300
-                                    : Colors.grey.shade300,
+              // Action Buttons
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    setState(() => _showQuizResults = false);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _green,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 18),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    elevation: 0,
+                  ),
+                  child: const Text(
+                    'Review Detailed Answers',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextButton(
+                onPressed: _resetQuiz,
+                child: Text(
+                  'Retake Quiz',
+                  style: TextStyle(
+                    color: _textGray,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 40),
+            ],
+          ),
+        if (!_showQuizResults)
+          SizedBox(
+            height: MediaQuery.of(context).size.height * 0.65,
+            child: ListView.builder(
+              padding: const EdgeInsets.all(4),
+              itemCount: _quizQuestions.length,
+              itemBuilder: (context, index) {
+                final question = _quizQuestions[index];
+                return Container(
+                  margin: const EdgeInsets.only(bottom: 20),
+                  decoration: BoxDecoration(
+                    color: _cardWhite,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(
+                      color: _showQuizResults
+                          ? question.isCorrect
+                                ? Colors.green.shade200
+                                : Colors.red.shade200
+                          : Colors.grey.shade200,
+                    ),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Container(
+                              width: 28,
+                              height: 28,
+                              decoration: BoxDecoration(
+                                color: Colors.blue.shade100,
+                                shape: BoxShape.circle,
                               ),
-                            ),
-                            child: Row(
-                              children: [
-                                Container(
-                                  width: 24,
-                                  height: 24,
-                                  decoration: BoxDecoration(
-                                    shape: BoxShape.circle,
-                                    border: Border.all(
-                                      color: isSelected
-                                          ? Colors.blue
-                                          : Colors.grey.shade400,
-                                      width: 2,
-                                    ),
-                                    color: isSelected
-                                        ? Colors.blue
-                                        : Colors.transparent,
-                                  ),
-                                  child: Center(
-                                    child: Text(
-                                      String.fromCharCode(65 + optIndex),
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.bold,
-                                        color: isSelected
-                                            ? Colors.white
-                                            : Colors.grey.shade600,
-                                      ),
-                                    ),
-                                  ),
-                                ),
-                                const SizedBox(width: 12),
-                                Expanded(
-                                  child: Text(
-                                    question.options[optIndex],
-                                    style: TextStyle(
-                                      color: textColor ?? Colors.black87,
-                                    ),
-                                  ),
-                                ),
-                                if (trailingIcon != null)
-                                  Icon(
-                                    trailingIcon,
-                                    color: textColor,
-                                    size: 20,
-                                  ),
-                              ],
-                            ),
-                          ),
-                        );
-                      }),
-                      if (_showQuizResults &&
-                          question.explanation.isNotEmpty) ...[
-                        const SizedBox(height: 12),
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: Colors.blue.shade50,
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Icon(
-                                Icons.lightbulb,
-                                size: 18,
-                                color: Colors.blue.shade700,
-                              ),
-                              const SizedBox(width: 8),
-                              Expanded(
+                              child: Center(
                                 child: Text(
-                                  question.explanation,
+                                  '${index + 1}',
                                   style: TextStyle(
-                                    fontSize: 13,
+                                    fontWeight: FontWeight.bold,
                                     color: Colors.blue.shade700,
                                   ),
                                 ),
                               ),
-                            ],
-                          ),
+                            ),
+                            const SizedBox(width: 12),
+                            Expanded(
+                              child: Text(
+                                question.question,
+                                style: const TextStyle(
+                                  fontSize: 15,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
+                        const SizedBox(height: 16),
+                        ...List.generate(question.options.length, (optIndex) {
+                          final isSelected =
+                              question.selectedAnswerIndex == optIndex;
+                          final isCorrect =
+                              question.correctAnswerIndex == optIndex;
+
+                          Color? backgroundColor;
+                          Color? textColor;
+                          IconData? trailingIcon;
+
+                          if (_showQuizResults) {
+                            if (isCorrect) {
+                              backgroundColor = Colors.green.shade50;
+                              textColor = Colors.green.shade700;
+                              trailingIcon = Icons.check_circle;
+                            } else if (isSelected && !isCorrect) {
+                              backgroundColor = Colors.red.shade50;
+                              textColor = Colors.red.shade700;
+                              trailingIcon = Icons.cancel;
+                            }
+                          } else if (isSelected) {
+                            backgroundColor = Colors.blue.shade50;
+                            textColor = Colors.blue.shade700;
+                          }
+
+                          return GestureDetector(
+                            onTap: _showQuizResults
+                                ? null
+                                : () => _selectAnswer(index, optIndex),
+                            child: Container(
+                              margin: const EdgeInsets.only(bottom: 8),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 12,
+                              ),
+                              decoration: BoxDecoration(
+                                color: backgroundColor ?? Colors.grey.shade50,
+                                borderRadius: BorderRadius.circular(8),
+                                border: Border.all(
+                                  color: isSelected
+                                      ? Colors.blue.shade300
+                                      : Colors.grey.shade300,
+                                ),
+                              ),
+                              child: Row(
+                                children: [
+                                  Container(
+                                    width: 24,
+                                    height: 24,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: isSelected
+                                            ? Colors.blue
+                                            : Colors.grey.shade400,
+                                        width: 2,
+                                      ),
+                                      color: isSelected
+                                          ? Colors.blue
+                                          : Colors.transparent,
+                                    ),
+                                    child: isSelected && !_showQuizResults
+                                        ? const Center(
+                                            child: Icon(
+                                              Icons.check,
+                                              size: 14,
+                                              color: Colors.white,
+                                            ),
+                                          )
+                                        : null,
+                                  ),
+                                  const SizedBox(width: 12),
+                                  Expanded(
+                                    child: Text(
+                                      question.options[optIndex],
+                                      style: TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: isSelected
+                                            ? FontWeight.w600
+                                            : FontWeight.w400,
+                                        color: textColor ?? _textDark,
+                                      ),
+                                    ),
+                                  ),
+                                  if (trailingIcon != null)
+                                    Icon(
+                                      trailingIcon,
+                                      color: textColor,
+                                      size: 20,
+                                    ),
+                                ],
+                              ),
+                            ),
+                          );
+                        }),
+                        if (_showQuizResults && question.explanation.isNotEmpty)
+                          Container(
+                            margin: const EdgeInsets.only(top: 12),
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.blue.withOpacity(0.05),
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                const Icon(
+                                  Icons.info_outline_rounded,
+                                  size: 16,
+                                  color: Colors.blue,
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    question.explanation,
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.blue.shade800,
+                                      height: 1.4,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                       ],
-                    ],
+                    ),
                   ),
-                ),
-              );
-            },
+                );
+              },
+            ),
           ),
-        ),
         if (!_showQuizResults && _quizQuestions.isNotEmpty)
           Padding(
             padding: const EdgeInsets.all(16),
             child: ElevatedButton(
               onPressed: _submitQuiz,
               style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.orange,
+                backgroundColor: _green,
                 foregroundColor: Colors.white,
-                minimumSize: const Size(double.infinity, 50),
+                minimumSize: const Size(double.infinity, 54),
                 shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(30),
+                  borderRadius: BorderRadius.circular(16),
                 ),
+                elevation: 0,
               ),
               child: const Text(
                 'Submit Quiz',
@@ -2058,6 +3110,69 @@ ANSWER (be concise but helpful):''';
               ),
             ),
           ),
+      ],
+    );
+  }
+
+  Widget _buildResultPill(IconData icon, String label, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      decoration: BoxDecoration(
+        color: color.withOpacity(0.1),
+        borderRadius: BorderRadius.circular(30),
+        border: Border.all(color: color.withOpacity(0.2)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 16, color: color),
+          const SizedBox(width: 8),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: color,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDifficultyRow(String label, double value, Color color) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text(
+              label,
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: _textDark,
+              ),
+            ),
+            Text(
+              '${(value * 100).round()}%',
+              style: const TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w800,
+                color: _textDark,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        LinearProgressIndicator(
+          value: value,
+          backgroundColor: Colors.grey.shade100,
+          valueColor: AlwaysStoppedAnimation<Color>(color),
+          minHeight: 8,
+          borderRadius: BorderRadius.circular(4),
+        ),
       ],
     );
   }

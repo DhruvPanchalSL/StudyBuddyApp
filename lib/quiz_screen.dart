@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 
+import 'models/quiz_history.dart';
 import 'models/quiz_question.dart';
+import 'quiz_details_screen.dart';
 
 /// A dedicated full-screen quiz experience matching the design reference.
 /// Pass [questions], [pdfName] and an optional [onQuizComplete] callback.
@@ -83,10 +85,41 @@ class _QuizScreenState extends State<QuizScreen>
     if (_currentIndex < _total - 1) {
       setState(() => _currentIndex++);
     } else {
-      // Quiz complete
+      // Quiz complete — fire callback then show results screen
       int score = widget.questions.where((q) => q.isCorrect).length;
       widget.onQuizComplete?.call(score, widget.questions);
-      Navigator.pop(context);
+
+      // Build question details for QuizDetailsScreen
+      final questionDetails = widget.questions
+          .map(
+            (q) => {
+              'question': q.question,
+              'options': q.options,
+              'userAnswer': q.selectedAnswerIndex,
+              'correctAnswer': q.correctAnswerIndex,
+              'isCorrect': q.isCorrect,
+              'explanation': q.explanation,
+            },
+          )
+          .toList();
+
+      // Replace this screen with the results screen
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(
+          builder: (context) => QuizDetailsScreen(
+            history: QuizHistory(
+              id: DateTime.now().millisecondsSinceEpoch.toString(),
+              userId: '', // filled by onQuizComplete callback in main
+              date: DateTime.now(),
+              pdfName: widget.pdfName,
+              score: score,
+              totalQuestions: widget.questions.length,
+              questions: questionDetails,
+            ),
+          ),
+        ),
+      );
     }
   }
 
