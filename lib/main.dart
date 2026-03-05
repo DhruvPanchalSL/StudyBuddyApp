@@ -13,6 +13,7 @@ import 'package:shimmer/shimmer.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import 'auth_screen.dart';
+import 'chat_screen.dart';
 import 'features/flashcards/flashcard_screen.dart';
 import 'history_screen.dart';
 import 'login_success_screen.dart';
@@ -20,6 +21,7 @@ import 'models/chat_message.dart';
 import 'models/quiz_history.dart';
 import 'models/quiz_question.dart';
 import 'quiz_screen.dart';
+import 'settings_screen.dart'; // NEW IMPORT
 
 // Used to signal a freshlogin so the success screen is shown
 bool kShowLoginSuccess = false;
@@ -91,20 +93,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   bool _showQuizResults = false;
   List<QuizQuestion> _quizQuestions = [];
   int _quizScore = 0;
-  String? _lastQuizId; // Keep this if it's still used elsewhere
+  String? _lastQuizId;
   List<ChatMessage> _chatMessages = [];
   final TextEditingController _chatController = TextEditingController();
-  bool _isSendingMessage = false; // Keep this if it's still used elsewhere
-  final ScrollController _chatScrollController =
-      ScrollController(); // Renamed from _scrollController in snippet
+  bool _isSendingMessage = false;
+  final ScrollController _chatScrollController = ScrollController();
   int _currentTabIndex = 0; // 0=Summary, 1=Quiz, 2=Cards, 3=Chat
   int _bottomNavIndex = 0; // 0=Home, 1=Library, 2=AI Tools, 3=Profile
   late TabController _tabController;
 
-  // Real data state (from original code, but re-aligned with snippet's structure)
   List<Map<String, dynamic>> _recentSessions = [];
 
-  // --- NEW: Structured Learning State ---
+  // --- Structured Learning State ---
   bool _isStructuredLearningMode = false;
   List<String> _allPdfPagesText = [];
   int _pagesPerModule = 10;
@@ -113,10 +113,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       ? 0
       : (_allPdfPagesText.length / _pagesPerModule).ceil();
 
+  // --- NEW: API Key State ---
+  String _userApiKey = '';
+
+  // Active API key getter — uses user's key if set, otherwise falls back to default
+  String get _activeApiKey {
+    final userKey = _userApiKey.trim();
+    return userKey.isNotEmpty ? userKey : (dotenv.env['GEMINI_API_KEY'] ?? '');
+  }
+
   final String _geminiEndpoint =
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
 
-  // Color palette matching design
+  // Color palette
   static const Color _green = Color(0xFF7ED957);
   static const Color _darkNavy = Color(0xFF1A1A2E);
   static const Color _teal = Color(0xFF00C2B2);
@@ -153,6 +162,26 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
     _loadRecentSessions();
     _loadProfileStats();
+    _loadUserApiKey(); // NEW
+  }
+
+  // --- NEW: Load user's saved API key from Firestore ---
+  Future<void> _loadUserApiKey() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .get();
+      if (doc.exists) {
+        setState(() {
+          _userApiKey = doc.data()?['geminiApiKey'] ?? '';
+        });
+      }
+    } catch (e) {
+      debugPrint('Error loading user API key: $e');
+    }
   }
 
   Future<void> _loadProfileStats() async {
@@ -188,12 +217,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         avg = (totalScorePercent / total) * 100;
       }
 
-      // Robust streak calculation
       int streak = 0;
       DateTime checkDate = DateTime.now();
       checkDate = DateTime(checkDate.year, checkDate.month, checkDate.day);
 
-      // If no activity today, check yesterday to see if streak is still alive
       if (!activity.containsKey(checkDate)) {
         checkDate = checkDate.subtract(const Duration(days: 1));
       }
@@ -306,13 +333,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         });
 
         if (isStructured) {
-          // If in structured mode, check history to resume or start config sheet
           Future.microtask(() => _checkStructuredProgressAndPrompt());
         } else {
-          // Standard mode: Combine all text and proceed
           setState(() {
             _extractedText = _allPdfPagesText.join('\n');
-            _bottomNavIndex = 2; // Switch to AI Tools tab
+            _bottomNavIndex = 2;
           });
           if (onComplete != null) {
             await onComplete();
@@ -407,7 +432,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                           });
                           _loadModule(nextModuleIndex);
                           setState(() {
-                            _bottomNavIndex = 2; // AI tools tab
+                            _bottomNavIndex = 2;
                           });
                         },
                         child: const Text('Resume Next Module'),
@@ -416,7 +441,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                   );
                 },
               );
-              return; // Wait for user choice
+              return;
             }
           }
         }
@@ -425,7 +450,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       debugPrint('Error checking progress: $e');
     }
 
-    // Default fallback
     _showStructuredConfigSheet();
   }
 
@@ -443,8 +467,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     setState(() {
       _currentModuleIndex = moduleIndex;
       _extractedText = modulePagesText.join('\n');
-
-      // Reset AI tools state for the new module
       _summary = "";
       _quizQuestions = [];
     });
@@ -489,9 +511,11 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     });
 
     try {
-      String apiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
-      if (apiKey.isEmpty)
-        throw Exception('API key not found. Check your .env file');
+      // UPDATED: Use _activeApiKey instead of dotenv directly
+      String apiKey = _activeApiKey;
+      if (apiKey.isEmpty) {
+        throw Exception('No API key found. Please add one in Settings.');
+      }
 
       final url = Uri.parse('$_geminiEndpoint?key=$apiKey');
 
@@ -599,9 +623,11 @@ $textToSummarize''';
     });
 
     try {
-      String apiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
-      if (apiKey.isEmpty)
-        throw Exception('API key not found. Check your .env file');
+      // UPDATED: Use _activeApiKey instead of dotenv directly
+      String apiKey = _activeApiKey;
+      if (apiKey.isEmpty) {
+        throw Exception('No API key found. Please add one in Settings.');
+      }
 
       final url = Uri.parse('$_geminiEndpoint?key=$apiKey');
 
@@ -683,7 +709,6 @@ JSON RESPONSE:''';
               _isGeneratingQuiz = false;
             });
 
-            // Navigate to the dedicated full-screen QuizScreen
             if (mounted) {
               Navigator.push(
                 context,
@@ -698,7 +723,6 @@ JSON RESPONSE:''';
                         _showQuizResults = true;
                       });
 
-                      // Calculate difficulty analysis
                       final Map<String, dynamic> diffAnalysis = {
                         'EASY': {'total': 0, 'correct': 0},
                         'MEDIUM': {'total': 0, 'correct': 0},
@@ -758,9 +782,7 @@ JSON RESPONSE:''';
         ),
       );
     }
-  } // End of generateQuiz or whatever was there before
-
-  // Duplicate _saveQuizToHistory removed from here because it's already defined at 964
+  }
 
   Future<void> _showStructuredConfigSheet() async {
     int selectedPages = 10;
@@ -881,7 +903,7 @@ JSON RESPONSE:''';
                   onPressed: () {
                     setState(() {
                       _pagesPerModule = selectedPages;
-                      _bottomNavIndex = 2; // Switch to AI Tools tab
+                      _bottomNavIndex = 2;
                     });
                     _loadModule(0);
                     Navigator.pop(context);
@@ -968,7 +990,6 @@ JSON RESPONSE:''';
                 ),
               ),
               const SizedBox(height: 32),
-              // Question Count Selector
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -1083,8 +1104,11 @@ JSON RESPONSE:''';
     _scrollToBottom();
 
     try {
-      String apiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
-      if (apiKey.isEmpty) throw Exception('API key not found');
+      // UPDATED: Use _activeApiKey instead of dotenv directly
+      String apiKey = _activeApiKey;
+      if (apiKey.isEmpty) {
+        throw Exception('No API key found. Please add one in Settings.');
+      }
 
       final url = Uri.parse('$_geminiEndpoint?key=$apiKey');
 
@@ -1170,7 +1194,7 @@ ANSWER (be concise but helpful):''';
         _chatMessages.add(
           ChatMessage(
             text:
-                "Sorry, I encountered an error: ${e.toString().substring(0, 100)}",
+                "Sorry, I encountered an error: ${e.toString().substring(0, e.toString().length.clamp(0, 100))}",
             isUser: false,
             timestamp: DateTime.now(),
           ),
@@ -1255,8 +1279,8 @@ ANSWER (be concise but helpful):''';
       _lastQuizId = history.id;
 
       if (mounted) {
-        _loadProfileStats(); // Refresh stats immediately
-        _loadRecentSessions(); // Refresh recent sessions
+        _loadProfileStats();
+        _loadRecentSessions();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('✅ Quiz saved to history!'),
@@ -1279,7 +1303,6 @@ ANSWER (be concise but helpful):''';
       _quizScore = score;
       _showQuizResults = true;
     });
-    // Call with dummy values for the deprecated inline quiz flow
     _saveQuizToHistory(0, {
       'EASY': {'total': 0, 'correct': 0},
       'MEDIUM': {'total': 0, 'correct': 0},
@@ -1410,111 +1433,6 @@ ANSWER (be concise but helpful):''';
     return _buildChatTab();
   }
 
-  Widget _buildSkeletonLoader() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(20),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // Simulated Tab Bar
-          Row(
-            children: List.generate(
-              4,
-              (i) => Expanded(
-                child: Container(
-                  height: 36,
-                  margin: const EdgeInsets.only(right: 8),
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade200,
-                    borderRadius: BorderRadius.circular(18),
-                  ),
-                ),
-              ),
-            ),
-          ),
-          const SizedBox(height: 30),
-          // Large main card skeleton
-          Container(
-            height: 200,
-            width: double.infinity,
-            decoration: BoxDecoration(
-              color: Colors.grey.shade100,
-              borderRadius: BorderRadius.circular(20),
-            ),
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  SizedBox(
-                    width: 32,
-                    height: 32,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: _green,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    'AI is processing your content...',
-                    style: TextStyle(
-                      color: _textGray,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 24),
-          // List item skeletons
-          ...List.generate(
-            3,
-            (i) => Container(
-              margin: const EdgeInsets.only(bottom: 16),
-              padding: const EdgeInsets.all(16),
-              decoration: BoxDecoration(
-                border: Border.all(color: Colors.grey.shade100),
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Row(
-                children: [
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: Colors.grey.shade100,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Container(
-                          height: 14,
-                          width: 140,
-                          color: Colors.grey.shade100,
-                        ),
-                        const SizedBox(height: 8),
-                        Container(
-                          height: 10,
-                          width: double.infinity,
-                          color: Colors.grey.shade50,
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
   Widget _buildProfileTab() {
     final user = FirebaseAuth.instance.currentUser;
     final email = user?.email ?? 'user@example.com';
@@ -1568,6 +1486,7 @@ ANSWER (be concise but helpful):''';
             ),
           ),
           const SizedBox(height: 20),
+
           // Activity Graph Section
           Container(
             width: double.infinity,
@@ -1601,8 +1520,21 @@ ANSWER (be concise but helpful):''';
             ),
           ),
           const SizedBox(height: 20),
-          // Actions
-          _buildProfileAction(Icons.settings_outlined, 'Settings', () {}),
+
+          // UPDATED: Settings now navigates to SettingsScreen
+          _buildProfileAction(Icons.settings_outlined, 'Settings', () async {
+            await Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => SettingsScreen(
+                  currentApiKey: _userApiKey,
+                  onApiKeyChanged: (newKey) {
+                    setState(() => _userApiKey = newKey);
+                  },
+                ),
+              ),
+            );
+          }),
           _buildProfileAction(Icons.help_outline, 'Help Center', () {}),
           _buildProfileAction(Icons.logout, 'Log out', () async {
             await FirebaseAuth.instance.signOut();
@@ -1674,7 +1606,6 @@ ANSWER (be concise but helpful):''';
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
 
-    // Calculate the start of the grid (12 weeks ago, aligned to Sunday)
     final startDate = today.subtract(
       Duration(days: today.weekday % 7 + (11 * 7)),
     );
@@ -1683,7 +1614,7 @@ ANSWER (be concise but helpful):''';
       children: [
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
-          reverse: true, // Show most recent on the right
+          reverse: true,
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: List.generate(12, (weekIndex) {
@@ -1701,10 +1632,9 @@ ANSWER (be concise but helpful):''';
                         )] ??
                         0;
 
-                    // GitHub-like color intensity
                     Color cellColor;
                     if (date.isAfter(today)) {
-                      cellColor = Colors.transparent; // Future dates
+                      cellColor = Colors.transparent;
                     } else if (count == 0) {
                       cellColor = const Color(0xFFEBEDF0);
                     } else if (count == 1) {
@@ -1795,7 +1725,6 @@ ANSWER (be concise but helpful):''';
               children: [
                 Row(
                   children: [
-                    // Avatar
                     Container(
                       width: 42,
                       height: 42,
@@ -1919,7 +1848,7 @@ ANSWER (be concise but helpful):''';
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
           IconButton(
-            icon: Icon(Icons.arrow_back_ios_rounded, size: 18),
+            icon: const Icon(Icons.arrow_back_ios_rounded, size: 18),
             color: _currentModuleIndex > 0
                 ? Colors.purple.shade700
                 : Colors.grey,
@@ -1948,7 +1877,7 @@ ANSWER (be concise but helpful):''';
             ],
           ),
           IconButton(
-            icon: Icon(Icons.arrow_forward_ios_rounded, size: 18),
+            icon: const Icon(Icons.arrow_forward_ios_rounded, size: 18),
             color: _currentModuleIndex < _totalModules - 1
                 ? Colors.purple.shade700
                 : Colors.grey,
@@ -2027,8 +1956,19 @@ ANSWER (be concise but helpful):''';
             Icons.chat_bubble_rounded,
             const Color(0xFF10B981),
             3,
-            () =>
-                setState(() => _bottomNavIndex = 0), // Chat is the learning tab
+            () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => ChatScreen(
+                    extractedText: _extractedText,
+                    summary: _summary,
+                    documentName: _selectedFileName,
+                    activeApiKey: _activeApiKey, // passes user or default key
+                  ),
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -2154,20 +2094,17 @@ ANSWER (be concise but helpful):''';
         ),
       ),
     );
-  } // End of _buildToolOutput
+  }
 
   Widget _buildEmptyState() {
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Column(
         children: [
-          // Upload Card
           _buildUploadCard(),
           const SizedBox(height: 16),
-          // Action Buttons
           _buildActionButtons(),
           const SizedBox(height: 24),
-          // Recent Sessions
           _buildRecentSessions(),
           const SizedBox(height: 100),
         ],
@@ -2192,7 +2129,6 @@ ANSWER (be concise but helpful):''';
       ),
       child: Column(
         children: [
-          // Dashed border icon container
           Container(
             width: 80,
             height: 80,
@@ -2299,10 +2235,8 @@ ANSWER (be concise but helpful):''';
   Widget _buildActionButtons() {
     return Column(
       children: [
-        // Row: Summarize + Generate Quiz
         Row(
           children: [
-            // Summarize - Green
             Expanded(
               child: GestureDetector(
                 onTap: _extractedText.isNotEmpty && !_isGeneratingSummary
@@ -2347,7 +2281,6 @@ ANSWER (be concise but helpful):''';
               ),
             ),
             const SizedBox(width: 14),
-            // Generate Quiz - Dark Navy
             Expanded(
               child: GestureDetector(
                 onTap: _extractedText.isNotEmpty && !_isGeneratingQuiz
@@ -2396,7 +2329,6 @@ ANSWER (be concise but helpful):''';
           ],
         ),
         const SizedBox(height: 14),
-        // Study Flashcards - Light gray
         GestureDetector(
           onTap: _extractedText.isNotEmpty
               ? () {
@@ -2536,9 +2468,6 @@ ANSWER (be concise but helpful):''';
             : Column(
                 children: _recentSessions.asMap().entries.map((entry) {
                   final session = entry.value;
-                  final percentage = session['total'] > 0
-                      ? ((session['score'] / session['total']) * 100).round()
-                      : 0;
 
                   final icons = [
                     Icons.menu_book_rounded,
@@ -2611,7 +2540,7 @@ ANSWER (be concise but helpful):''';
                               ),
                               const SizedBox(height: 3),
                               Text(
-                                '${_formatTimeAgo(session['date'])} • ${session['total']} Flashcards',
+                                '${_formatTimeAgo(session['date'])} • ${session['total']} Questions',
                                 style: TextStyle(
                                   fontSize: 12,
                                   color: _textGray,
@@ -2653,94 +2582,6 @@ ANSWER (be concise but helpful):''';
     );
   }
 
-  // Widget _buildLoadedActionButtons() {
-  //   return Row(
-  //     children: [
-  //       Expanded(
-  //         child: _buildSmallActionChip(
-  //           Icons.summarize_outlined,
-  //           'Summary',
-  //           _green,
-  //           _isGeneratingSummary ? null : _generateSummary,
-  //           _isGeneratingSummary,
-  //         ),
-  //       ),
-  //       const SizedBox(width: 10),
-  //       Expanded(
-  //         child: _buildSmallActionChip(
-  //           Icons.quiz_outlined,
-  //           'Quiz',
-  //           _darkNavy,
-  //           _isGeneratingQuiz ? null : _generateQuiz,
-  //           _isGeneratingQuiz,
-  //         ),
-  //       ),
-  //       const SizedBox(width: 10),
-  //       Expanded(
-  //         child: _buildSmallActionChip(
-  //           Icons.auto_stories_outlined,
-  //           'Cards',
-  //           Colors.purple,
-  //           () {
-  //             Navigator.push(
-  //               context,
-  //               MaterialPageRoute(
-  //                 builder: (context) => FlashcardScreen(
-  //                   documentText: _extractedText,
-  //                   documentName: _selectedFileName,
-  //                 ),
-  //               ),
-  //             );
-  //           },
-  //           false,
-  //         ),
-  //       ),
-  //     ],
-  //   );
-  // }
-
-  // Widget _buildSmallActionChip(
-  //   IconData icon,
-  //   String label,
-  //   Color color,
-  //   VoidCallback? onTap,
-  //   bool loading,
-  // ) {
-  //   return GestureDetector(
-  //     onTap: onTap,
-  //     child: Container(
-  //       padding: const EdgeInsets.symmetric(vertical: 10),
-  //       decoration: BoxDecoration(
-  //         color: color.withOpacity(0.1),
-  //         borderRadius: BorderRadius.circular(12),
-  //         border: Border.all(color: color.withOpacity(0.25)),
-  //       ),
-  //       child: Row(
-  //         mainAxisAlignment: MainAxisAlignment.center,
-  //         children: [
-  //           if (loading)
-  //             SizedBox(
-  //               width: 14,
-  //               height: 14,
-  //               child: CircularProgressIndicator(strokeWidth: 2, color: color),
-  //             )
-  //           else
-  //             Icon(icon, color: color, size: 16),
-  //           const SizedBox(width: 6),
-  //           Text(
-  //             label,
-  //             style: TextStyle(
-  //               color: color,
-  //               fontSize: 12,
-  //               fontWeight: FontWeight.w600,
-  //             ),
-  //           ),
-  //         ],
-  //       ),
-  //     ),
-  //   );
-  // }
-
   Widget _buildFlashcardsTab() {
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
@@ -2748,8 +2589,8 @@ ANSWER (be concise but helpful):''';
         children: [
           Container(
             padding: const EdgeInsets.all(32),
-            decoration: BoxDecoration(
-              color: const Color(0xFFF3E8FF),
+            decoration: const BoxDecoration(
+              color: Color(0xFFF3E8FF),
               shape: BoxShape.circle,
             ),
             child: const Icon(
@@ -2827,7 +2668,6 @@ ANSWER (be concise but helpful):''';
       );
     }
 
-    // Parse the structured summary
     String executiveSummary = "";
     String keyThemes = "";
     String analysis = "";
@@ -2863,7 +2703,7 @@ ANSWER (be concise but helpful):''';
         studyGuide = _summary.split('[STUDY_GUIDE_AND_REFLECTIONS]')[1].trim();
       }
     } catch (e) {
-      executiveSummary = _summary; // Fallback to raw text if parsing fails
+      executiveSummary = _summary;
     }
 
     return SingleChildScrollView(
@@ -2919,7 +2759,6 @@ ANSWER (be concise but helpful):''';
             ),
             const SizedBox(height: 24),
           ],
-          // Action Buttons
           Row(
             children: [
               Expanded(
@@ -2948,7 +2787,7 @@ ANSWER (be concise but helpful):''';
               ),
             ],
           ),
-          const SizedBox(height: 100), // Space for bottom padding
+          const SizedBox(height: 100),
         ],
       ),
     );
@@ -3303,7 +3142,6 @@ ANSWER (be concise but helpful):''';
         if (_showQuizResults)
           Column(
             children: [
-              // Score Ring
               Center(
                 child: Container(
                   width: 200,
@@ -3375,8 +3213,6 @@ ANSWER (be concise but helpful):''';
                 style: TextStyle(color: _textGray, fontSize: 14),
               ),
               const SizedBox(height: 24),
-
-              // Stats Pills
               Row(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
@@ -3394,8 +3230,6 @@ ANSWER (be concise but helpful):''';
                 ],
               ),
               const SizedBox(height: 24),
-
-              // AI Insight Card
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
@@ -3446,8 +3280,6 @@ ANSWER (be concise but helpful):''';
                 ),
               ),
               const SizedBox(height: 32),
-
-              // Difficulty Analysis
               Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -3481,8 +3313,6 @@ ANSWER (be concise but helpful):''';
                 ],
               ),
               const SizedBox(height: 40),
-
-              // Action Buttons
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
