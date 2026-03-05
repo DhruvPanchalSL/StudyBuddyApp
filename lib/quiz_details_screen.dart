@@ -1,4 +1,7 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 import 'models/quiz_history.dart';
 
@@ -25,10 +28,82 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
   static const Color _textGray = Color(0xFF8E8E93);
   static const Color _red = Color(0xFFFF3B30);
 
+  bool _isGeneratingInsight = false;
+  String _aiInsight = "Our AI is analyzing your performance...";
+
   @override
   void initState() {
     super.initState();
     _tabController = TabController(length: 2, vsync: this);
+    _generateAIInsight();
+  }
+
+  Future<void> _generateAIInsight() async {
+    setState(() => _isGeneratingInsight = true);
+    try {
+      final apiKey = dotenv.env['GEMINI_API_KEY'] ?? '';
+      if (apiKey.isEmpty) throw Exception('API key not found');
+
+      final url = Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=$apiKey');
+      
+      final score = widget.history.score;
+      final total = widget.history.totalQuestions;
+      final time = widget.history.timeTaken;
+      
+      final wrongQuestions = widget.history.questions
+          .where((q) => q['isCorrect'] == false)
+          .map((q) => "${q['question']} (Correct: ${q['options'][q['correctAnswer']]})")
+          .join("\n- ");
+
+      final prompt = '''As an AI Study Tutor, provide a brief, professional, and encouraging performance analysis for a student who just completed a quiz.
+      
+DATA:
+- Score: $score/$total (${(score/total*100).round()}%)
+- Time Taken: ${_formatDuration(time)}
+- Topics missed:
+${wrongQuestions.isEmpty ? "None! Perfect score." : "- " + wrongQuestions}
+
+REQUIREMENTS:
+1. Keep it under 3-4 sentences.
+2. Be specific about their performance.
+3. Provide one actionable tip for improvement (or maintenance if they did great).
+4. Tone: Professional, supportive, and analytical.
+
+INSIGHT:''';
+
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          "contents": [{"parts": [{"text": prompt}]}],
+          "generationConfig": {"temperature": 0.7, "maxOutputTokens": 200}
+        }),
+      );
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final insight = data['candidates'][0]['content']['parts'][0]['text'].trim();
+        setState(() {
+          _aiInsight = insight;
+          _isGeneratingInsight = false;
+        });
+      } else {
+        throw Exception('API Error');
+      }
+    } catch (e) {
+      debugPrint('Error generating insight: $e');
+      setState(() {
+        _aiInsight = "Great effort! Focus on reviewing the questions you missed to reinforce your understanding of ${widget.history.pdfName}. Consistent review is key to mastery.";
+        _isGeneratingInsight = false;
+      });
+    }
+  }
+
+  String _formatDuration(int seconds) {
+    if (seconds < 60) return '${seconds}s';
+    final m = seconds ~/ 60;
+    final s = seconds % 60;
+    return '${m}m ${s}s';
   }
 
   @override
@@ -56,7 +131,7 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
 
   String _getScoreSubtitle() {
     double pct = _getPercentage();
-    if (pct >= 80) return 'You performed better than 92% of users today.';
+    if (pct >= 80) return 'You performed exceptionally well. Great job!';
     if (pct >= 60) return 'You\'re making solid progress. Keep it up!';
     return 'Review the material and try again.';
   }
@@ -86,16 +161,6 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
           ),
         ),
         centerTitle: true,
-        actions: [
-          IconButton(
-            icon: const Icon(
-              Icons.ios_share_outlined,
-              color: _textDark,
-              size: 22,
-            ),
-            onPressed: () {},
-          ),
-        ],
       ),
       body: SingleChildScrollView(
         child: Column(
@@ -182,7 +247,7 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
                     children: [
                       _buildStatChip(
                         Icons.access_time_rounded,
-                        '12m 45s',
+                        _formatDuration(widget.history.timeTaken),
                         const Color(0xFFF0FAF0),
                         _green,
                       ),
@@ -220,11 +285,16 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
                       color: _green.withOpacity(0.2),
                       shape: BoxShape.circle,
                     ),
-                    child: const Icon(
-                      Icons.auto_awesome,
-                      color: _greenDark,
-                      size: 18,
-                    ),
+                    child: _isGeneratingInsight
+                        ? const Padding(
+                            padding: EdgeInsets.all(8.0),
+                            child: CircularProgressIndicator(strokeWidth: 2, color: _greenDark),
+                          )
+                        : const Icon(
+                            Icons.auto_awesome,
+                            color: _greenDark,
+                            size: 18,
+                          ),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -232,7 +302,7 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         const Text(
-                          'AI Insight',
+                          'AI Learning Insight',
                           style: TextStyle(
                             fontWeight: FontWeight.w700,
                             fontSize: 14,
@@ -241,7 +311,7 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
                         ),
                         const SizedBox(height: 4),
                         Text(
-                          'You\'ve mastered "Quantum Fundamentals". We recommend focusing on "Wave-Particle Duality" next.',
+                          _aiInsight,
                           style: TextStyle(
                             fontSize: 13,
                             color: _textDark.withOpacity(0.75),
@@ -274,34 +344,29 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
                           color: _textDark,
                         ),
                       ),
-                      Text(
-                        'GLOBAL AVG: 72%',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: _textGray,
-                          letterSpacing: 0.5,
-                        ),
-                      ),
                     ],
                   ),
                   const SizedBox(height: 20),
                   _buildDifficultyBlock(
                     'EASY',
                     'Foundational',
-                    100,
+                    _getDiffPct('EASY'),
                     _green,
-                    '+2%',
                   ),
                   const SizedBox(height: 16),
                   _buildDifficultyBlock(
                     'MEDIUM',
                     'Intermediate',
-                    85,
+                    _getDiffPct('MEDIUM'),
                     Colors.orange,
-                    '-4%',
                   ),
                   const SizedBox(height: 16),
-                  _buildDifficultyBlock('HARD', 'Advanced', 70, _red, '+3%'),
+                  _buildDifficultyBlock(
+                    'HARD',
+                    'Advanced',
+                    _getDiffPct('HARD'),
+                    _red,
+                  ),
                 ],
               ),
             ),
@@ -554,14 +619,19 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
     );
   }
 
+  int _getDiffPct(String level) {
+    if (widget.history.difficultyAnalysis == null) return 0;
+    final data = widget.history.difficultyAnalysis![level];
+    if (data == null || data['total'] == 0) return 0;
+    return ((data['correct'] / data['total']) * 100).round();
+  }
+
   Widget _buildDifficultyBlock(
     String level,
     String name,
     int percentage,
     Color color,
-    String delta,
   ) {
-    final isPositive = delta.startsWith('+');
     return Row(
       crossAxisAlignment: CrossAxisAlignment.center,
       children: [
@@ -605,7 +675,7 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
           ),
         ),
         const SizedBox(width: 12),
-        // Right: percentage + delta
+        // Right: percentage
         Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
@@ -615,23 +685,6 @@ class _QuizDetailsScreenState extends State<QuizDetailsScreen>
                 fontSize: 22,
                 fontWeight: FontWeight.w800,
                 color: _textDark,
-              ),
-            ),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-              decoration: BoxDecoration(
-                color: isPositive
-                    ? _green.withOpacity(0.15)
-                    : _red.withOpacity(0.1),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Text(
-                delta,
-                style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w700,
-                  color: isPositive ? _green : _red,
-                ),
               ),
             ),
           ],

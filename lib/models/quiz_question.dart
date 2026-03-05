@@ -4,6 +4,7 @@ class QuizQuestion {
   final List<String> options;
   final int correctAnswerIndex;
   final String explanation;
+  final String difficulty;
   int? selectedAnswerIndex;
 
   QuizQuestion({
@@ -11,6 +12,7 @@ class QuizQuestion {
     required this.options,
     required this.correctAnswerIndex,
     required this.explanation,
+    this.difficulty = 'MEDIUM',
     this.selectedAnswerIndex,
   });
 
@@ -20,6 +22,7 @@ class QuizQuestion {
       options: List<String>.from(json['options'] ?? ['A', 'B', 'C', 'D']),
       correctAnswerIndex: json['correctAnswerIndex'] ?? 0,
       explanation: json['explanation'] ?? 'No explanation available',
+      difficulty: json['difficulty'] ?? 'MEDIUM',
     );
   }
 

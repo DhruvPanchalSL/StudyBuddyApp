@@ -10,7 +10,7 @@ class QuizScreen extends StatefulWidget {
   final List<QuizQuestion> questions;
   final String pdfName;
   final String? chapterTitle;
-  final void Function(int score, List<QuizQuestion> questions)? onQuizComplete;
+  final void Function(int score, List<QuizQuestion> questions, int timeTaken)? onQuizComplete;
 
   const QuizScreen({
     super.key,
@@ -35,6 +35,7 @@ class _QuizScreenState extends State<QuizScreen>
   static const Color _white = Colors.white;
 
   int _currentIndex = 0;
+  final Stopwatch _stopwatch = Stopwatch();
 
   // Animation for option tap feedback
   late AnimationController _bounceController;
@@ -43,6 +44,7 @@ class _QuizScreenState extends State<QuizScreen>
   @override
   void initState() {
     super.initState();
+    _stopwatch.start();
     _bounceController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 120),
@@ -86,8 +88,28 @@ class _QuizScreenState extends State<QuizScreen>
       setState(() => _currentIndex++);
     } else {
       // Quiz complete — fire callback then show results screen
+      _stopwatch.stop();
+      final timeTaken = _stopwatch.elapsed.inSeconds;
       int score = widget.questions.where((q) => q.isCorrect).length;
-      widget.onQuizComplete?.call(score, widget.questions);
+      
+      // Calculate difficulty analysis
+      final Map<String, dynamic> diffAnalysis = {
+        'EASY': {'total': 0, 'correct': 0},
+        'MEDIUM': {'total': 0, 'correct': 0},
+        'HARD': {'total': 0, 'correct': 0},
+      };
+
+      for (var q in widget.questions) {
+        final d = q.difficulty.toUpperCase();
+        if (diffAnalysis.containsKey(d)) {
+          diffAnalysis[d]!['total'] = (diffAnalysis[d]!['total'] ?? 0) + 1;
+          if (q.isCorrect) {
+            diffAnalysis[d]!['correct'] = (diffAnalysis[d]!['correct'] ?? 0) + 1;
+          }
+        }
+      }
+
+      widget.onQuizComplete?.call(score, widget.questions, timeTaken);
 
       // Build question details for QuizDetailsScreen
       final questionDetails = widget.questions
@@ -99,6 +121,7 @@ class _QuizScreenState extends State<QuizScreen>
               'correctAnswer': q.correctAnswerIndex,
               'isCorrect': q.isCorrect,
               'explanation': q.explanation,
+              'difficulty': q.difficulty,
             },
           )
           .toList();
@@ -116,6 +139,8 @@ class _QuizScreenState extends State<QuizScreen>
               score: score,
               totalQuestions: widget.questions.length,
               questions: questionDetails,
+              timeTaken: timeTaken,
+              difficultyAnalysis: diffAnalysis,
             ),
           ),
         ),
@@ -179,7 +204,7 @@ class _QuizScreenState extends State<QuizScreen>
               ),
             ),
 
-            // ── Bottom action bar ────────────────────────────────
+            // ── Bottom action bar ───────
             _buildBottomBar(),
           ],
         ),
@@ -187,7 +212,7 @@ class _QuizScreenState extends State<QuizScreen>
     );
   }
 
-  // ── Sub-widgets ─────────────────────────────────────────────────
+  // ── Sub-widgets ───────────
 
   Widget _buildHeader() {
     final title = widget.pdfName
