@@ -20,6 +20,7 @@ class _HistoryScreenState extends State<HistoryScreen>
   final user = FirebaseAuth.instance.currentUser;
   late TabController _tabController;
   int _selectedTabIndex = 0;
+  Stream<QuerySnapshot>? _quizzesStream;
 
   // Brand colors
   static const Color _green = Color(0xFF7ED957);
@@ -35,6 +36,15 @@ class _HistoryScreenState extends State<HistoryScreen>
     _tabController.addListener(() {
       setState(() => _selectedTabIndex = _tabController.index);
     });
+
+    if (user != null) {
+      _quizzesStream = FirebaseFirestore.instance
+          .collection('users')
+          .doc(user!.uid)
+          .collection('quiz_history')
+          .orderBy('date', descending: true)
+          .snapshots();
+    }
   }
 
   @override
@@ -219,18 +229,24 @@ class _HistoryScreenState extends State<HistoryScreen>
   }
 
   Widget _buildQuizzesTab() {
+    if (_quizzesStream == null) {
+      return Center(
+        child: Text(
+          'Please login to view history',
+          style: TextStyle(color: _textGray),
+        ),
+      );
+    }
+
     return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('users')
-          .doc(user!.uid)
-          .collection('quiz_history')
-          .orderBy('date', descending: true)
-          .snapshots(),
+      stream: _quizzesStream,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(
-            child: CircularProgressIndicator(color: Color(0xFF7ED957)),
-          );
+          // Return a slightly transparent/empty container if cache hasn't loaded 
+          // yet to avoid harsh blinking of the CircularProgressIndicator.
+          // Fallback to spinner after a tiny delay conceptually, 
+          // but typically Firestore cache is instant so returning SizedBox prevents blink.
+          return const SizedBox(); 
         }
 
         if (snapshot.hasError) {
@@ -339,7 +355,9 @@ class _HistoryScreenState extends State<HistoryScreen>
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                history.pdfName,
+                                history.isStructured && history.moduleIndex != null && history.totalModules != null
+                                    ? '${history.pdfName} (Module ${history.moduleIndex! + 1}/${history.totalModules})'
+                                    : history.pdfName,
                                 style: const TextStyle(
                                   fontSize: 14,
                                   fontWeight: FontWeight.w700,

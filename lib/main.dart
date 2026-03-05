@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:StudyBuddy/quiz_details_screen.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:firebase_auth/firebase_auth.dart';
@@ -10,7 +9,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
-import 'package:intl/intl.dart';
+import 'package:shimmer/shimmer.dart';
 import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import 'auth_screen.dart';
@@ -82,29 +81,37 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
+  // Existing State
   String _selectedFileName = "No file selected";
   String _extractedText = "";
   String _summary = "";
-
-  List<QuizQuestion> _quizQuestions = [];
-  bool _isGeneratingQuiz = false;
-  bool _showQuizResults = false;
-  int _quizScore = 0;
-  String? _lastQuizId;
-
-  List<ChatMessage> _chatMessages = [];
-  final TextEditingController _chatController = TextEditingController();
-  bool _isSendingMessage = false;
-  final ScrollController _chatScrollController = ScrollController();
-
   bool _isLoading = false;
   bool _isGeneratingSummary = false;
-
+  bool _isGeneratingQuiz = false;
+  bool _showQuizResults = false;
+  List<QuizQuestion> _quizQuestions = [];
+  int _quizScore = 0;
+  String? _lastQuizId; // Keep this if it's still used elsewhere
+  List<ChatMessage> _chatMessages = [];
+  final TextEditingController _chatController = TextEditingController();
+  bool _isSendingMessage = false; // Keep this if it's still used elsewhere
+  final ScrollController _chatScrollController =
+      ScrollController(); // Renamed from _scrollController in snippet
+  int _currentTabIndex = 0; // 0=Summary, 1=Quiz, 2=Cards, 3=Chat
+  int _bottomNavIndex = 0; // 0=Home, 1=Library, 2=AI Tools, 3=Profile
   late TabController _tabController;
-  int _currentTabIndex = 0;
-  int _bottomNavIndex = 0;
 
+  // Real data state (from original code, but re-aligned with snippet's structure)
   List<Map<String, dynamic>> _recentSessions = [];
+
+  // --- NEW: Structured Learning State ---
+  bool _isStructuredLearningMode = false;
+  List<String> _allPdfPagesText = [];
+  int _pagesPerModule = 10;
+  int _currentModuleIndex = 0;
+  int get _totalModules => _allPdfPagesText.isEmpty
+      ? 0
+      : (_allPdfPagesText.length / _pagesPerModule).ceil();
 
   final String _geminiEndpoint =
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
@@ -227,9 +234,18 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           final dateObj = dateStr != null
               ? DateTime.parse(dateStr)
               : DateTime.now();
+          final isStructured = data['isStructured'] == true;
+          final moduleIndex = data['moduleIndex'] as int?;
+          final totalModules = data['totalModules'] as int?;
+          final pdfName = data['pdfName'] ?? 'Untitled';
+          final title =
+              isStructured && moduleIndex != null && totalModules != null
+              ? '$pdfName (Module ${moduleIndex + 1}/$totalModules)'
+              : pdfName;
+
           return {
             'id': doc.id,
-            'title': data['pdfName'] ?? 'Untitled',
+            'title': title,
             'date': dateObj,
             'score': data['score'] ?? 0,
             'total': data['totalQuestions'] ?? 0,
@@ -249,7 +265,10 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     super.dispose();
   }
 
-  Future<void> _pickAndReadPDF({Future<void> Function()? onComplete}) async {
+  Future<void> _pickAndReadPDF({
+    Future<void> Function()? onComplete,
+    bool isStructured = false,
+  }) async {
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
         type: FileType.custom,
@@ -273,19 +292,31 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
               timestamp: DateTime.now(),
             ),
           );
+          _isStructuredLearningMode = isStructured;
+          _allPdfPagesText = [];
+          _currentModuleIndex = 0;
         });
 
         String filePath = result.files.first.path!;
-        String text = await _extractTextFromPDF(filePath);
+        List<String> pages = await _extractTextFromPDF(filePath);
 
         setState(() {
-          _extractedText = text;
+          _allPdfPagesText = pages;
           _isLoading = false;
-          _bottomNavIndex = 2; // Switch to AI Tools tab
         });
 
-        if (onComplete != null) {
-          await onComplete();
+        if (isStructured) {
+          // If in structured mode, check history to resume or start config sheet
+          Future.microtask(() => _checkStructuredProgressAndPrompt());
+        } else {
+          // Standard mode: Combine all text and proceed
+          setState(() {
+            _extractedText = _allPdfPagesText.join('\n');
+            _bottomNavIndex = 2; // Switch to AI Tools tab
+          });
+          if (onComplete != null) {
+            await onComplete();
+          }
         }
       } else {
         setState(() {
@@ -301,7 +332,126 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     }
   }
 
-  Future<String> _extractTextFromPDF(String filePath) async {
+  Future<void> _checkStructuredProgressAndPrompt() async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null || !mounted) {
+      _showStructuredConfigSheet();
+      return;
+    }
+
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('users')
+          .doc(user.uid)
+          .collection('quiz_history')
+          .where('pdfName', isEqualTo: _selectedFileName)
+          .where('isStructured', isEqualTo: true)
+          .get();
+
+      if (snapshot.docs.isNotEmpty) {
+        int maxModuleIndex = -1;
+        Map<String, dynamic>? bestData;
+
+        for (var doc in snapshot.docs) {
+          final data = doc.data();
+          final mIndex = data['moduleIndex'] as int?;
+          if (mIndex != null && mIndex > maxModuleIndex) {
+            maxModuleIndex = mIndex;
+            bestData = data;
+          }
+        }
+
+        if (bestData != null) {
+          final totalModules = bestData['totalModules'] as int?;
+          final pagesPerModule = bestData['pagesPerModule'] as int?;
+
+          if (totalModules != null && pagesPerModule != null) {
+            final nextModuleIndex = maxModuleIndex + 1;
+
+            if (nextModuleIndex < totalModules && mounted) {
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (BuildContext context) {
+                  return AlertDialog(
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    title: const Text('Resume Learning?'),
+                    content: Text(
+                      'You previously completed Module ${maxModuleIndex + 1} of $totalModules.\n\nWould you like to proceed with Module ${nextModuleIndex + 1}, or start over?',
+                    ),
+                    actions: [
+                      TextButton(
+                        onPressed: () {
+                          Navigator.pop(context);
+                          _showStructuredConfigSheet();
+                        },
+                        child: const Text(
+                          'Start Over',
+                          style: TextStyle(color: Colors.grey),
+                        ),
+                      ),
+                      ElevatedButton(
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: _green,
+                          foregroundColor: Colors.white,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(8),
+                          ),
+                        ),
+                        onPressed: () {
+                          Navigator.pop(context);
+                          setState(() {
+                            _pagesPerModule = pagesPerModule;
+                          });
+                          _loadModule(nextModuleIndex);
+                          setState(() {
+                            _bottomNavIndex = 2; // AI tools tab
+                          });
+                        },
+                        child: const Text('Resume Next Module'),
+                      ),
+                    ],
+                  );
+                },
+              );
+              return; // Wait for user choice
+            }
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('Error checking progress: $e');
+    }
+
+    // Default fallback
+    _showStructuredConfigSheet();
+  }
+
+  void _loadModule(int moduleIndex) {
+    if (_allPdfPagesText.isEmpty) return;
+
+    int startIndex = moduleIndex * _pagesPerModule;
+    int endIndex = startIndex + _pagesPerModule;
+    if (endIndex > _allPdfPagesText.length) {
+      endIndex = _allPdfPagesText.length;
+    }
+
+    final modulePagesText = _allPdfPagesText.sublist(startIndex, endIndex);
+
+    setState(() {
+      _currentModuleIndex = moduleIndex;
+      _extractedText = modulePagesText.join('\n');
+
+      // Reset AI tools state for the new module
+      _summary = "";
+      _quizQuestions = [];
+    });
+  }
+
+  Future<List<String>> _extractTextFromPDF(String filePath) async {
+    List<String> pagesText = [];
     try {
       File file = File(filePath);
       List<int> bytes = await file.readAsBytes();
@@ -309,22 +459,20 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       PdfDocument document = PdfDocument(inputBytes: bytes);
       PdfTextExtractor extractor = PdfTextExtractor(document);
 
-      StringBuffer allText = StringBuffer();
-
       for (int i = 0; i < document.pages.count; i++) {
         String pageText = extractor.extractText(
           startPageIndex: i,
           endPageIndex: i,
         );
-        allText.writeln("--- Page ${i + 1} ---");
-        allText.writeln(pageText);
-        allText.writeln("");
+        pagesText.add("--- Page ${i + 1} ---\n$pageText\n");
       }
 
       document.dispose();
-      return allText.toString();
+      return pagesText;
     } catch (e) {
-      return "Could not extract text. This PDF might be scanned or image-based.\nError: $e";
+      return [
+        "Could not extract text. This PDF might be scanned or image-based.\nError: $e",
+      ];
     }
   }
 
@@ -348,22 +496,30 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       final url = Uri.parse('$_geminiEndpoint?key=$apiKey');
 
       String textToSummarize = _extractedText;
-      if (textToSummarize.length > 30000) {
+      if (textToSummarize.length > 100000) {
         textToSummarize =
-            textToSummarize.substring(0, 30000) +
+            textToSummarize.substring(0, 100000) +
             "\n\n[Note: Text truncated due to length...]";
       }
 
       String prompt =
-          '''Please provide a structured summary of the following text using these exact section headers:
-[TL;DR]
-(A concise, high-impact paragraph summarizing the core message)
+          '''Please provide a highly detailed, professional, and structured analysis of the following text. 
+Use these exact section headers for organization:
 
-[KEY_POINTS]
-(3-5 critical bullet points using •)
+[EXECUTIVE_SUMMARY]
+(A comprehensive 2-3 paragraph overview of the document's purpose, core thesis, and main conclusions. This should be a self-contained summary.)
+
+[KEY_THEMES_AND_CONCEPTS]
+(Identify the 5-7 most important themes, concepts, or arguments presented. For each, provide a brief explanation of its significance within the text.)
 
 [DETAILED_ANALYSIS]
-(A deeper dive into the technical or conceptual details)
+(A deep dive into the specific details, data points, or technical explanations. Break down complex ideas into manageable parts.)
+
+[PRACTICAL_APPLICATIONS]
+(Explain how the information in this document can be applied in real-world scenarios, professional contexts, or further study.)
+
+[STUDY_GUIDE_AND_REFLECTIONS]
+(Provide 3-5 thought-provoking questions or areas for further reflection based on the text to help the reader consolidate their learning.)
 
 Text to analyze:
 $textToSummarize''';
@@ -460,6 +616,7 @@ $textToSummarize''';
           '''Based on the following text, generate $count multiple choice quiz questions.
 Each question should have 4 options (A, B, C, D) with exactly one correct answer.
 Include a brief explanation for why the correct answer is right.
+Assign a difficulty level (EASY, MEDIUM, HARD) to each question based on the depth of understanding required.
 
 Return the response in this EXACT JSON format:
 {
@@ -468,13 +625,15 @@ Return the response in this EXACT JSON format:
       "question": "Question text here?",
       "options": ["Option A", "Option B", "Option C", "Option D"],
       "correctAnswerIndex": 0,
-      "explanation": "Explanation why this is correct"
+      "explanation": "Explanation why this is correct",
+      "difficulty": "MEDIUM"
     }
   ]
 }
 
 IMPORTANT: 
 - correctAnswerIndex must be 0, 1, 2, or 3
+- difficulty must be "EASY", "MEDIUM", or "HARD"
 - Make questions challenging but fair
 - Base questions strictly on the provided text
 
@@ -533,12 +692,31 @@ JSON RESPONSE:''';
                     questions: questions,
                     pdfName: _selectedFileName,
                     chapterTitle: 'Document Review',
-                    onQuizComplete: (score, completedQuestions) {
+                    onQuizComplete: (score, completedQuestions, timeTaken) {
                       setState(() {
                         _quizScore = score;
                         _showQuizResults = true;
                       });
-                      _saveQuizToHistory();
+
+                      // Calculate difficulty analysis
+                      final Map<String, dynamic> diffAnalysis = {
+                        'EASY': {'total': 0, 'correct': 0},
+                        'MEDIUM': {'total': 0, 'correct': 0},
+                        'HARD': {'total': 0, 'correct': 0},
+                      };
+                      for (var q in completedQuestions) {
+                        final d = q.difficulty.toUpperCase();
+                        if (diffAnalysis.containsKey(d)) {
+                          diffAnalysis[d]!['total'] =
+                              (diffAnalysis[d]!['total'] ?? 0) + 1;
+                          if (q.isCorrect) {
+                            diffAnalysis[d]!['correct'] =
+                                (diffAnalysis[d]!['correct'] ?? 0) + 1;
+                          }
+                        }
+                      }
+
+                      _saveQuizToHistory(timeTaken, diffAnalysis);
                     },
                   ),
                 ),
@@ -580,6 +758,154 @@ JSON RESPONSE:''';
         ),
       );
     }
+  } // End of generateQuiz or whatever was there before
+
+  // Duplicate _saveQuizToHistory removed from here because it's already defined at 964
+
+  Future<void> _showStructuredConfigSheet() async {
+    int selectedPages = 10;
+    return showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+          ),
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 24),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Row(
+                children: [
+                  Icon(
+                    Icons.view_module_rounded,
+                    color: Colors.purple.shade400,
+                    size: 28,
+                  ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Structured Learning',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: _textDark,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Pages per Module',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: _textDark,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Divide your document into bite-sized segments (1-50 pages).',
+                  style: TextStyle(fontSize: 13, color: _textGray),
+                ),
+              ),
+              const SizedBox(height: 32),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildCountButton(setSheetState, selectedPages, (val) {
+                    setSheetState(() => selectedPages = val);
+                  }, maxVal: 50),
+                  Text(
+                    '$selectedPages',
+                    style: TextStyle(
+                      fontSize: 48,
+                      fontWeight: FontWeight.w900,
+                      color: Colors.purple.shade400,
+                    ),
+                  ),
+                  _buildCountButton(
+                    setSheetState,
+                    selectedPages,
+                    (val) {
+                      setSheetState(() => selectedPages = val);
+                    },
+                    isAdd: true,
+                    maxVal: 50,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  activeTrackColor: Colors.purple.shade400,
+                  inactiveTrackColor: Colors.purple.shade100,
+                  thumbColor: Colors.purple.shade400,
+                  overlayColor: Colors.purple.withOpacity(0.2),
+                  valueIndicatorColor: _textDark,
+                  trackHeight: 6,
+                ),
+                child: Slider(
+                  value: selectedPages.toDouble(),
+                  min: 1,
+                  max: 50,
+                  divisions: 49,
+                  label: selectedPages.toString(),
+                  onChanged: (value) {
+                    setSheetState(() => selectedPages = value.round());
+                  },
+                ),
+              ),
+              const SizedBox(height: 32),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    setState(() {
+                      _pagesPerModule = selectedPages;
+                      _bottomNavIndex = 2; // Switch to AI Tools tab
+                    });
+                    _loadModule(0);
+                    Navigator.pop(context);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.purple.shade400,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    elevation: 0,
+                  ),
+                  child: const Text(
+                    'Start Learning',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _showQuizConfigSheet() async {
@@ -718,8 +1044,9 @@ JSON RESPONSE:''';
     int current,
     void Function(int) onChanged, {
     bool isAdd = false,
+    int maxVal = 15,
   }) {
-    bool disabled = isAdd ? current >= 15 : current <= 1;
+    bool disabled = isAdd ? current >= maxVal : current <= 1;
     return GestureDetector(
       onTap: disabled
           ? null
@@ -873,7 +1200,10 @@ ANSWER (be concise but helpful):''';
     });
   }
 
-  Future<void> _saveQuizToHistory() async {
+  Future<void> _saveQuizToHistory(
+    int timeTaken,
+    Map<String, dynamic> difficultyAnalysis,
+  ) async {
     try {
       final user = FirebaseAuth.instance.currentUser;
       if (user == null) {
@@ -895,6 +1225,7 @@ ANSWER (be concise but helpful):''';
           'correctAnswer': q.correctAnswerIndex,
           'isCorrect': q.isCorrect,
           'explanation': q.explanation,
+          'difficulty': q.difficulty,
         });
       }
 
@@ -906,6 +1237,12 @@ ANSWER (be concise but helpful):''';
         score: _quizScore,
         totalQuestions: _quizQuestions.length,
         questions: questionDetails,
+        timeTaken: timeTaken,
+        difficultyAnalysis: difficultyAnalysis,
+        isStructured: _isStructuredLearningMode,
+        moduleIndex: _currentModuleIndex,
+        totalModules: _totalModules,
+        pagesPerModule: _pagesPerModule,
       );
 
       await FirebaseFirestore.instance
@@ -928,8 +1265,6 @@ ANSWER (be concise but helpful):''';
           ),
         );
       }
-
-      _loadRecentSessions();
     } catch (e) {
       debugPrint('Error saving quiz history: $e');
     }
@@ -944,7 +1279,12 @@ ANSWER (be concise but helpful):''';
       _quizScore = score;
       _showQuizResults = true;
     });
-    _saveQuizToHistory();
+    // Call with dummy values for the deprecated inline quiz flow
+    _saveQuizToHistory(0, {
+      'EASY': {'total': 0, 'correct': 0},
+      'MEDIUM': {'total': 0, 'correct': 0},
+      'HARD': {'total': 0, 'correct': 0},
+    });
   }
 
   void _resetQuiz() {
@@ -956,8 +1296,6 @@ ANSWER (be concise but helpful):''';
       _quizScore = 0;
     });
   }
-
-
 
   String _formatTimeAgo(DateTime date) {
     final now = DateTime.now();
@@ -976,9 +1314,9 @@ ANSWER (be concise but helpful):''';
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
-    final userName = user?.email?.split('@').first ?? 'Alex Johnson';
-    final formattedName = userName[0].toUpperCase() + userName.substring(1);
-    final displayName = formattedName.split('.').first;
+    final rawName =
+        user?.displayName ?? user?.email?.split('@').first ?? 'Student';
+    final displayName = rawName.isEmpty ? 'Student' : rawName;
 
     return Scaffold(
       backgroundColor: _bgGray,
@@ -1006,28 +1344,10 @@ ANSWER (be concise but helpful):''';
           onTabChange: (index) => setState(() => _bottomNavIndex = index),
         );
       case 2:
-        return _extractedText.isEmpty
-            ? Center(
-                child: Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(
-                      Icons.auto_fix_high_rounded,
-                      size: 64,
-                      color: Colors.grey.shade300,
-                    ),
-                    const SizedBox(height: 16),
-                    Text(
-                      'Upload a PDF on the Home tab\nto use AI Tools',
-                      textAlign: TextAlign.center,
-                      style: TextStyle(color: _textGray, fontSize: 15),
-                    ),
-                  ],
-                ),
-              )
-            : (_isGeneratingSummary || _isGeneratingQuiz)
-                ? _buildSkeletonLoader()
-                : _buildDocumentView();
+        if (_extractedText.isEmpty) {
+          return _buildNoDocumentState();
+        }
+        return _buildAiToolsTab();
       case 3:
         return _buildProfileTab();
       default:
@@ -1035,6 +1355,60 @@ ANSWER (be concise but helpful):''';
     }
   }
 
+  Widget _buildNoDocumentState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.upload_file_outlined,
+              size: 72,
+              color: Colors.grey.shade300,
+            ),
+            const SizedBox(height: 24),
+            const Text(
+              'No Document Loaded',
+              style: TextStyle(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: _textDark,
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              'Upload a PDF from the Home tab to use AI tools.',
+              textAlign: TextAlign.center,
+              style: TextStyle(color: _textGray, fontSize: 14, height: 1.5),
+            ),
+            const SizedBox(height: 32),
+            ElevatedButton.icon(
+              onPressed: () => setState(() => _bottomNavIndex = 0),
+              icon: const Icon(Icons.home_rounded),
+              label: const Text('Go to Home'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _green,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 28,
+                  vertical: 14,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
+                ),
+                elevation: 0,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildLearningTab() {
+    return _buildChatTab();
+  }
 
   Widget _buildSkeletonLoader() {
     return SingleChildScrollView(
@@ -1044,16 +1418,19 @@ ANSWER (be concise but helpful):''';
         children: [
           // Simulated Tab Bar
           Row(
-            children: List.generate(4, (i) => Expanded(
-              child: Container(
-                height: 36,
-                margin: const EdgeInsets.only(right: 8),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade200,
-                  borderRadius: BorderRadius.circular(18),
+            children: List.generate(
+              4,
+              (i) => Expanded(
+                child: Container(
+                  height: 36,
+                  margin: const EdgeInsets.only(right: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade200,
+                    borderRadius: BorderRadius.circular(18),
+                  ),
                 ),
               ),
-            )),
+            ),
           ),
           const SizedBox(height: 30),
           // Large main card skeleton
@@ -1068,7 +1445,7 @@ ANSWER (be concise but helpful):''';
               child: Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                   SizedBox(
+                  SizedBox(
                     width: 32,
                     height: 32,
                     child: CircularProgressIndicator(
@@ -1091,45 +1468,48 @@ ANSWER (be concise but helpful):''';
           ),
           const SizedBox(height: 24),
           // List item skeletons
-          ...List.generate(3, (i) => Container(
-            margin: const EdgeInsets.only(bottom: 16),
-            padding: const EdgeInsets.all(16),
-            decoration: BoxDecoration(
-              border: Border.all(color: Colors.grey.shade100),
-              borderRadius: BorderRadius.circular(16),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 48,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: Colors.grey.shade100,
-                    borderRadius: BorderRadius.circular(12),
+          ...List.generate(
+            3,
+            (i) => Container(
+              margin: const EdgeInsets.only(bottom: 16),
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                border: Border.all(color: Colors.grey.shade100),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Row(
+                children: [
+                  Container(
+                    width: 48,
+                    height: 48,
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade100,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
                   ),
-                ),
-                const SizedBox(width: 16),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(
-                        height: 14,
-                        width: 140,
-                        color: Colors.grey.shade100,
-                      ),
-                      const SizedBox(height: 8),
-                      Container(
-                        height: 10,
-                        width: double.infinity,
-                        color: Colors.grey.shade50,
-                      ),
-                    ],
+                  const SizedBox(width: 16),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          height: 14,
+                          width: 140,
+                          color: Colors.grey.shade100,
+                        ),
+                        const SizedBox(height: 8),
+                        Container(
+                          height: 10,
+                          width: double.infinity,
+                          color: Colors.grey.shade50,
+                        ),
+                      ],
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
-          )),
+          ),
         ],
       ),
     );
@@ -1138,7 +1518,8 @@ ANSWER (be concise but helpful):''';
   Widget _buildProfileTab() {
     final user = FirebaseAuth.instance.currentUser;
     final email = user?.email ?? 'user@example.com';
-    final name = email.split('@').first.toUpperCase();
+    final rawName = user?.displayName ?? email.split('@').first;
+    final name = (rawName.isEmpty ? 'Student' : rawName).toUpperCase();
 
     return SingleChildScrollView(
       padding: const EdgeInsets.all(20),
@@ -1488,9 +1869,6 @@ ANSWER (be concise but helpful):''';
             ),
           ),
           const SizedBox(height: 14),
-          // Pill Tab Bar - Only show on AI Tools tab
-          if (_bottomNavIndex == 2) _buildPillTabBar(),
-          if (_bottomNavIndex == 2) const SizedBox(height: 16),
         ],
       ),
     );
@@ -1511,113 +1889,272 @@ ANSWER (be concise but helpful):''';
     }
   }
 
-  Widget _buildPillTabBar() {
-    final tabs = ['Summary', 'Quiz', 'Chat', 'Flashcards'];
-    final icons = [
-      Icons.auto_awesome_outlined,
-      Icons.quiz_outlined,
-      Icons.chat_outlined,
-      Icons.auto_stories_outlined,
-    ];
-
-    return Container(
-      height: 48,
-      decoration: BoxDecoration(
-        color: const Color(0xFFE8E8ED),
-        borderRadius: BorderRadius.circular(30),
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: LayoutBuilder(
-        builder: (context, constraints) {
-          final tabWidth = constraints.maxWidth / tabs.length;
-          return Stack(
-            children: [
-              // Sliding Indicator
-              AnimatedAlign(
-                duration: const Duration(milliseconds: 350),
-                curve: Curves.easeInOutCubic,
-                alignment: Alignment(
-                  -1.0 + (_currentTabIndex * (2.0 / (tabs.length - 1))),
-                  0.0,
-                ),
-                child: Container(
-                  width: tabWidth,
-                  height: 48,
-                  decoration: BoxDecoration(
-                    color: _textDark,
-                    borderRadius: BorderRadius.circular(30),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.15),
-                        blurRadius: 8,
-                        offset: const Offset(0, 2),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-              // Tab Items
-              Row(
-                children: List.generate(tabs.length, (i) {
-                  final isSelected = _currentTabIndex == i;
-                  return Expanded(
-                    child: GestureDetector(
-                      onTap: () {
-                        if (_extractedText.isEmpty && i != 0) return;
-
-                        HapticFeedback.selectionClick();
-                        _tabController.animateTo(i);
-
-                        if (i == 0 &&
-                            _summary.isEmpty &&
-                            !_isGeneratingSummary) {
-                          _generateSummary();
-                        } else if (i == 1 &&
-                            _quizQuestions.isEmpty &&
-                            !_isGeneratingQuiz) {
-                          _showQuizConfigSheet();
-                        }
-                      },
-                      behavior: HitTestBehavior.opaque,
-                      child: Center(
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            AnimatedDefaultTextStyle(
-                              duration: const Duration(milliseconds: 300),
-                              style: TextStyle(
-                                color: isSelected ? Colors.white : _textGray,
-                              ),
-                              child: Icon(
-                                icons[i],
-                                size: 16,
-                                color: isSelected ? Colors.white : _textGray,
-                              ),
-                            ),
-                            const SizedBox(width: 6),
-                            Text(
-                              tabs[i],
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: isSelected
-                                    ? FontWeight.w700
-                                    : FontWeight.w500,
-                                color: isSelected ? Colors.white : _textGray,
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  );
-                }),
-              ),
-            ],
-          );
-        },
+  Widget _buildAiToolsTab() {
+    return SingleChildScrollView(
+      physics: const BouncingScrollPhysics(),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (_isStructuredLearningMode && _totalModules > 0)
+            _buildStructuredNavigationBar(),
+          _buildAISectionHeader(),
+          _buildToolGrid(),
+          const SizedBox(height: 24),
+          _buildToolOutput(),
+        ],
       ),
     );
   }
+
+  Widget _buildStructuredNavigationBar() {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 16, 20, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: Colors.purple.shade50,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: Colors.purple.shade200),
+      ),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          IconButton(
+            icon: Icon(Icons.arrow_back_ios_rounded, size: 18),
+            color: _currentModuleIndex > 0
+                ? Colors.purple.shade700
+                : Colors.grey,
+            onPressed: _currentModuleIndex > 0
+                ? () => _loadModule(_currentModuleIndex - 1)
+                : null,
+          ),
+          Column(
+            children: [
+              Text(
+                'Module ${_currentModuleIndex + 1} of $_totalModules',
+                style: TextStyle(
+                  fontWeight: FontWeight.w800,
+                  fontSize: 16,
+                  color: Colors.purple.shade700,
+                ),
+              ),
+              Text(
+                'Pages ${_currentModuleIndex * _pagesPerModule + 1} - ${(_currentModuleIndex * _pagesPerModule + _pagesPerModule).clamp(1, _allPdfPagesText.length)}',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.purple.shade600,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+          IconButton(
+            icon: Icon(Icons.arrow_forward_ios_rounded, size: 18),
+            color: _currentModuleIndex < _totalModules - 1
+                ? Colors.purple.shade700
+                : Colors.grey,
+            onPressed: _currentModuleIndex < _totalModules - 1
+                ? () => _loadModule(_currentModuleIndex + 1)
+                : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAISectionHeader() {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            'Unlock the power of your documents',
+            style: TextStyle(fontSize: 14, color: _textGray),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToolGrid() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 20),
+      child: GridView.count(
+        shrinkWrap: true,
+        physics: const NeverScrollableScrollPhysics(),
+        crossAxisCount: 2,
+        mainAxisSpacing: 16,
+        crossAxisSpacing: 16,
+        childAspectRatio: 1.4,
+        children: [
+          _buildToolCard(
+            'Smart\nSummary',
+            'Analytical breakdown',
+            Icons.summarize_rounded,
+            const Color(0xFF6366F1),
+            0,
+            _generateSummary,
+          ),
+          _buildToolCard(
+            'Smart\nQuiz',
+            'Test your knowledge',
+            Icons.quiz_rounded,
+            const Color(0xFFF59E0B),
+            1,
+            _showQuizConfigSheet,
+          ),
+          _buildToolCard(
+            'Smart\nCards',
+            'Flashcard system',
+            Icons.bolt_rounded,
+            const Color(0xFF8B5CF6),
+            2,
+            () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => FlashcardScreen(
+                    documentText: _extractedText,
+                    documentName: _selectedFileName,
+                  ),
+                ),
+              );
+            },
+          ),
+          _buildToolCard(
+            'Smart\nChat',
+            'Q&A Assistant',
+            Icons.chat_bubble_rounded,
+            const Color(0xFF10B981),
+            3,
+            () =>
+                setState(() => _bottomNavIndex = 0), // Chat is the learning tab
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildToolCard(
+    String title,
+    String subtitle,
+    IconData icon,
+    Color color,
+    int index,
+    VoidCallback onTap,
+  ) {
+    bool isSelected = _currentTabIndex == index;
+    return GestureDetector(
+      onTap: () {
+        setState(() => _currentTabIndex = index);
+        onTap();
+      },
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 250),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: color.withOpacity(0.08),
+          borderRadius: BorderRadius.circular(24),
+          border: Border.all(
+            color: isSelected ? color : Colors.transparent,
+            width: 2,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: color.withOpacity(0.15),
+                shape: BoxShape.circle,
+              ),
+              child: Icon(icon, color: color, size: 22),
+            ),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: FontWeight.w800,
+                    color: color.withOpacity(0.9),
+                    height: 1.2,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  subtitle,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: color.withOpacity(0.6),
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildToolOutput() {
+    if (_isGeneratingSummary || _isGeneratingQuiz) {
+      return Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 20),
+        child: Shimmer.fromColors(
+          baseColor: Colors.grey.shade200,
+          highlightColor: Colors.white,
+          child: Column(
+            children: List.generate(
+              3,
+              (i) => Container(
+                height: 100,
+                width: double.infinity,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  borderRadius: BorderRadius.circular(20),
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
+    }
+
+    if (_summary.isEmpty && _currentTabIndex == 0) {
+      return const Center(child: Text("Select a tool above to get started"));
+    }
+
+    if (_currentTabIndex == 0 && _summary.isNotEmpty) {
+      return _buildSummaryTab();
+    }
+
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(40),
+        child: Column(
+          children: [
+            Icon(
+              Icons.auto_awesome_outlined,
+              size: 48,
+              color: Colors.grey.shade300,
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              "Result will appear here",
+              textAlign: TextAlign.center,
+              style: TextStyle(color: Colors.grey),
+            ),
+          ],
+        ),
+      ),
+    );
+  } // End of _buildToolOutput
 
   Widget _buildEmptyState() {
     return SingleChildScrollView(
@@ -1690,29 +2227,69 @@ ANSWER (be concise but helpful):''';
           ),
           const SizedBox(height: 8),
           Text(
-            'Select a PDF document or paste a\nlink to start learning with AI\nassistance.',
+            'Upload a PDF to start learning with AI.',
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 13, color: _textGray, height: 1.5),
           ),
           const SizedBox(height: 24),
-          SizedBox(
-            width: 140,
-            height: 46,
-            child: ElevatedButton(
-              onPressed: _pickAndReadPDF,
-              style: ElevatedButton.styleFrom(
-                backgroundColor: _green,
-                foregroundColor: Colors.white,
-                elevation: 0,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(30),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () => _pickAndReadPDF(isStructured: false),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _green,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Column(
+                    children: [
+                      Icon(Icons.bolt_rounded, size: 20),
+                      SizedBox(height: 4),
+                      Text(
+                        'Standard',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              child: const Text(
-                'Pick PDF',
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton(
+                  onPressed: () => _pickAndReadPDF(isStructured: true),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.purple.shade400,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                  ),
+                  child: const Column(
+                    children: [
+                      Icon(Icons.view_module_rounded, size: 20),
+                      SizedBox(height: 4),
+                      Text(
+                        'Structured',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
-            ),
+            ],
           ),
         ],
       ),
@@ -1833,19 +2410,21 @@ ANSWER (be concise but helpful):''';
                     ),
                   );
                 }
-              : () => _pickAndReadPDF(onComplete: () async {
-                  if (_extractedText.isNotEmpty) {
-                    Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (context) => FlashcardScreen(
-                          documentText: _extractedText,
-                          documentName: _selectedFileName,
+              : () => _pickAndReadPDF(
+                  onComplete: () async {
+                    if (_extractedText.isNotEmpty) {
+                      Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (context) => FlashcardScreen(
+                            documentText: _extractedText,
+                            documentName: _selectedFileName,
+                          ),
                         ),
-                      ),
-                    );
-                  }
-                }),
+                      );
+                    }
+                  },
+                ),
           child: Container(
             width: double.infinity,
             height: 58,
@@ -2069,7 +2648,7 @@ ANSWER (be concise but helpful):''';
             ],
           ),
         ),
-        if (_currentTabIndex == 2) _buildChatInputBar(),
+        if (_currentTabIndex == 3) _buildChatInputBar(),
       ],
     );
   }
@@ -2249,22 +2828,42 @@ ANSWER (be concise but helpful):''';
     }
 
     // Parse the structured summary
-    String tldr = "";
-    String keyPoints = "";
+    String executiveSummary = "";
+    String keyThemes = "";
     String analysis = "";
+    String practicalApps = "";
+    String studyGuide = "";
 
     try {
-      if (_summary.contains('[TL;DR]')) {
-        tldr = _summary.split('[TL;DR]')[1].split('[')[0].trim();
+      if (_summary.contains('[EXECUTIVE_SUMMARY]')) {
+        executiveSummary = _summary
+            .split('[EXECUTIVE_SUMMARY]')[1]
+            .split('[')[0]
+            .trim();
       }
-      if (_summary.contains('[KEY_POINTS]')) {
-        keyPoints = _summary.split('[KEY_POINTS]')[1].split('[')[0].trim();
+      if (_summary.contains('[KEY_THEMES_AND_CONCEPTS]')) {
+        keyThemes = _summary
+            .split('[KEY_THEMES_AND_CONCEPTS]')[1]
+            .split('[')[0]
+            .trim();
       }
       if (_summary.contains('[DETAILED_ANALYSIS]')) {
-        analysis = _summary.split('[DETAILED_ANALYSIS]')[1].trim();
+        analysis = _summary
+            .split('[DETAILED_ANALYSIS]')[1]
+            .split('[')[0]
+            .trim();
+      }
+      if (_summary.contains('[PRACTICAL_APPLICATIONS]')) {
+        practicalApps = _summary
+            .split('[PRACTICAL_APPLICATIONS]')[1]
+            .split('[')[0]
+            .trim();
+      }
+      if (_summary.contains('[STUDY_GUIDE_AND_REFLECTIONS]')) {
+        studyGuide = _summary.split('[STUDY_GUIDE_AND_REFLECTIONS]')[1].trim();
       }
     } catch (e) {
-      tldr = _summary; // Fallback to raw text if parsing fails
+      executiveSummary = _summary; // Fallback to raw text if parsing fails
     }
 
     return SingleChildScrollView(
@@ -2273,17 +2872,17 @@ ANSWER (be concise but helpful):''';
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _buildSummarySection(
-            'Quick Summary',
-            tldr,
-            Icons.bolt_rounded,
+            'Executive Summary',
+            executiveSummary,
+            Icons.summarize_rounded,
             _green.withOpacity(0.1),
             _green,
           ),
           const SizedBox(height: 16),
-          if (keyPoints.isNotEmpty) ...[
+          if (keyThemes.isNotEmpty) ...[
             _buildSummarySection(
-              'Key Insights',
-              keyPoints,
+              'Key Themes & Concepts',
+              keyThemes,
               Icons.auto_awesome_mosaic_rounded,
               const Color(0xFF3B82F6).withOpacity(0.1),
               const Color(0xFF3B82F6),
@@ -2297,6 +2896,26 @@ ANSWER (be concise but helpful):''';
               Icons.analytics_outlined,
               const Color(0xFF8B5CF6).withOpacity(0.1),
               const Color(0xFF8B5CF6),
+            ),
+            const SizedBox(height: 16),
+          ],
+          if (practicalApps.isNotEmpty) ...[
+            _buildSummarySection(
+              'Practical Applications',
+              practicalApps,
+              Icons.lightbulb_outline_rounded,
+              const Color(0xFFF59E0B).withOpacity(0.1),
+              const Color(0xFFF59E0B),
+            ),
+            const SizedBox(height: 16),
+          ],
+          if (studyGuide.isNotEmpty) ...[
+            _buildSummarySection(
+              'Study Guide & Reflections',
+              studyGuide,
+              Icons.menu_book_rounded,
+              const Color(0xFFEC4899).withOpacity(0.1),
+              const Color(0xFFEC4899),
             ),
             const SizedBox(height: 24),
           ],

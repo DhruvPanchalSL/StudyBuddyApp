@@ -43,6 +43,7 @@ dependencies:
   firebase_auth: ^4.16.0
   cloud_firestore: ^4.15.5
   flutter_launcher_icons: ^0.14.4
+  shimmer: ^3.0.0
 
 dev_dependencies:
   flutter_test:
