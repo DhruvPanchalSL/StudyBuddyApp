@@ -242,11 +242,11 @@ class _HistoryScreenState extends State<HistoryScreen>
       stream: _quizzesStream,
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          // Return a slightly transparent/empty container if cache hasn't loaded 
+          // Return a slightly transparent/empty container if cache hasn't loaded
           // yet to avoid harsh blinking of the CircularProgressIndicator.
-          // Fallback to spinner after a tiny delay conceptually, 
+          // Fallback to spinner after a tiny delay conceptually,
           // but typically Firestore cache is instant so returning SizedBox prevents blink.
-          return const SizedBox(); 
+          return const SizedBox();
         }
 
         if (snapshot.hasError) {
@@ -355,7 +355,9 @@ class _HistoryScreenState extends State<HistoryScreen>
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                history.isStructured && history.moduleIndex != null && history.totalModules != null
+                                history.isStructured &&
+                                        history.moduleIndex != null &&
+                                        history.totalModules != null
                                     ? '${history.pdfName} (Module ${history.moduleIndex! + 1}/${history.totalModules})'
                                     : history.pdfName,
                                 style: const TextStyle(
@@ -558,7 +560,7 @@ class _HistoryScreenState extends State<HistoryScreen>
 
   Color _getIconBg(int index) {
     final colors = [
-      const Color(0xFF5BBF35),
+      const Color(0xFF4E7C3D),
       const Color(0xFF3B82F6),
       const Color(0xFF8B5CF6),
       const Color(0xFFEF4444),

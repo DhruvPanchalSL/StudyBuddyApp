@@ -9,14 +9,16 @@ class ChatScreen extends StatefulWidget {
   final String extractedText;
   final String summary;
   final String documentName;
-  final String activeApiKey; // NEW — pass _activeApiKey from HomeScreen
+  final String activeGeminiKey;
+  final String activeGroqKey;
 
   const ChatScreen({
     super.key,
     required this.extractedText,
     required this.summary,
     required this.documentName,
-    required this.activeApiKey,
+    required this.activeGeminiKey,
+    required this.activeGroqKey,
   });
 
   @override
@@ -32,8 +34,11 @@ class _ChatScreenState extends State<ChatScreen> {
   static const Color _textDark = Color(0xFF1A1A2E);
   static const Color _textGray = Color(0xFF8E8E93);
 
-  final String _geminiEndpoint =
+  static const String _geminiEndpoint =
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+  static const String _groqEndpoint =
+      'https://api.groq.com/openai/v1/chat/completions';
+  static const String _groqModel = 'llama-3.3-70b-versatile';
 
   final TextEditingController _chatController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
@@ -72,6 +77,77 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  // ── Gemini → Groq fallback ─────────────────────────────────────────────────
+  Future<String> _callAI(String prompt) async {
+    // Step 1: Try Gemini
+    if (widget.activeGeminiKey.isNotEmpty) {
+      try {
+        final url = Uri.parse('$_geminiEndpoint?key=${widget.activeGeminiKey}');
+        final response = await http.post(
+          url,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            "contents": [
+              {
+                "parts": [
+                  {"text": prompt},
+                ],
+              },
+            ],
+            "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
+          }),
+        );
+
+        if (response.statusCode == 200) {
+          final json = jsonDecode(response.body);
+          return json['candidates'][0]['content']['parts'][0]['text'] as String;
+        } else if (response.statusCode == 429) {
+          debugPrint('Gemini rate limited, falling back to Groq...');
+          // fall through to Groq
+        } else {
+          throw Exception('Gemini API Error: ${response.statusCode}');
+        }
+      } catch (e) {
+        if (e.toString().contains('Gemini API Error')) rethrow;
+        debugPrint('Gemini failed: $e — trying Groq');
+      }
+    }
+
+    // Step 2: Fallback to Groq
+    if (widget.activeGroqKey.isEmpty) {
+      throw Exception(
+        'All AI keys exhausted. Please add a Groq API key in Settings.',
+      );
+    }
+
+    final groqResponse = await http.post(
+      Uri.parse(_groqEndpoint),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ${widget.activeGroqKey}',
+      },
+      body: jsonEncode({
+        "model": _groqModel,
+        "messages": [
+          {"role": "user", "content": prompt},
+        ],
+        "max_tokens": 1024,
+        "temperature": 0.7,
+      }),
+    );
+
+    if (groqResponse.statusCode == 200) {
+      final json = jsonDecode(groqResponse.body);
+      return json['choices'][0]['message']['content'] as String;
+    } else if (groqResponse.statusCode == 429) {
+      throw Exception(
+        '⏳ Both Gemini and Groq are rate limited. Please wait a moment.',
+      );
+    } else {
+      throw Exception('Groq API Error: ${groqResponse.statusCode}');
+    }
+  }
+
   Future<void> _sendMessage() async {
     if (_chatController.text.trim().isEmpty) return;
 
@@ -86,20 +162,16 @@ class _ChatScreenState extends State<ChatScreen> {
     _scrollToBottom();
 
     try {
-      final apiKey = widget.activeApiKey;
-      if (apiKey.isEmpty)
-        throw Exception('No API key found. Please add one in Settings.');
-
-      final url = Uri.parse('$_geminiEndpoint?key=$apiKey');
-
       String context = widget.summary.isNotEmpty
           ? widget.summary
           : widget.extractedText;
-      if (context.length > 20000) context = context.substring(0, 20000) + "...";
+      if (context.length > 20000) {
+        context = context.substring(0, 20000) + "...";
+      }
 
       final prompt =
-          '''You are a helpful study assistant. Answer the user's question based ONLY on the following context.
-If the answer cannot be found in the context, say "I don't have enough information about that in the document."
+          '''You are a helpful study assistant. Answer the user\'s question based ONLY on the following context.
+If the answer cannot be found in the context, say "I don\'t have enough information about that in the document."
 
 CONTEXT:
 $context
@@ -108,56 +180,24 @@ USER QUESTION: $userMessage
 
 ANSWER (be concise but helpful):''';
 
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({
-          "contents": [
-            {
-              "parts": [
-                {"text": prompt},
-              ],
-            },
-          ],
-          "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
-        }),
-      );
+      final aiResponse = await _callAI(prompt);
 
-      if (response.statusCode == 200) {
-        final jsonResponse = jsonDecode(response.body);
-        final aiResponse =
-            jsonResponse['candidates'][0]['content']['parts'][0]['text'];
-        setState(() {
-          _chatMessages.add(
-            ChatMessage(
-              text: aiResponse,
-              isUser: false,
-              timestamp: DateTime.now(),
-            ),
-          );
-          _isSendingMessage = false;
-        });
-      } else if (response.statusCode == 429) {
-        setState(() {
-          _chatMessages.add(
-            ChatMessage(
-              text:
-                  "⏳ Rate limit reached. Please wait a minute before sending more messages.",
-              isUser: false,
-              timestamp: DateTime.now(),
-            ),
-          );
-          _isSendingMessage = false;
-        });
-      } else {
-        throw Exception('API Error: ${response.statusCode}');
-      }
+      setState(() {
+        _chatMessages.add(
+          ChatMessage(
+            text: aiResponse,
+            isUser: false,
+            timestamp: DateTime.now(),
+          ),
+        );
+        _isSendingMessage = false;
+      });
     } catch (e) {
       setState(() {
         _chatMessages.add(
           ChatMessage(
             text:
-                "Sorry, I encountered an error: ${e.toString().substring(0, e.toString().length.clamp(0, 100))}",
+                "Sorry, I encountered an error: ${e.toString().substring(0, e.toString().length.clamp(0, 120))}",
             isUser: false,
             timestamp: DateTime.now(),
           ),

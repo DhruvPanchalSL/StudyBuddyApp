@@ -3,7 +3,7 @@ import 'dart:math' as math;
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/material.dart';
 
-import 'package:StudyBuddy/main.dart' show kShowLoginSuccess;
+import 'login_success_screen.dart';
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({super.key});
@@ -12,8 +12,7 @@ class AuthScreen extends StatefulWidget {
   State<AuthScreen> createState() => _AuthScreenState();
 }
 
-class _AuthScreenState extends State<AuthScreen>
-    with TickerProviderStateMixin {
+class _AuthScreenState extends State<AuthScreen> with TickerProviderStateMixin {
   final _auth = FirebaseAuth.instance;
   bool isLogin = true;
   bool isLoading = false;
@@ -57,13 +56,16 @@ class _AuthScreenState extends State<AuthScreen>
     _formAnimController.forward();
 
     final rng = math.Random();
-    _particles = List.generate(16, (i) => _FloatingParticle(
-      x: rng.nextDouble(),
-      y: rng.nextDouble(),
-      size: 5 + rng.nextDouble() * 9,
-      speed: 0.2 + rng.nextDouble() * 0.45,
-      phase: rng.nextDouble() * math.pi * 2,
-    ));
+    _particles = List.generate(
+      16,
+      (i) => _FloatingParticle(
+        x: rng.nextDouble(),
+        y: rng.nextDouble(),
+        size: 5 + rng.nextDouble() * 9,
+        speed: 0.2 + rng.nextDouble() * 0.45,
+        phase: rng.nextDouble() * math.pi * 2,
+      ),
+    );
   }
 
   @override
@@ -97,8 +99,7 @@ class _AuthScreenState extends State<AuthScreen>
       return;
     }
     setState(() => isLoading = true);
-    // Set flag BEFORE await so StreamBuilder sees it when Firebase emits
-    kShowLoginSuccess = true;
+
     try {
       if (isLogin) {
         await _auth.signInWithEmailAndPassword(
@@ -110,16 +111,38 @@ class _AuthScreenState extends State<AuthScreen>
           email: _emailController.text.trim(),
           password: _passwordController.text.trim(),
         );
-        await cred.user?.updateDisplayName(_nameController.text.trim());
+        // Update display name in background — don't await so we don't delay
+        // the success screen from showing
+        cred.user?.updateDisplayName(_nameController.text.trim());
+      }
+
+      // Push success screen immediately after auth — before StreamBuilder
+      // has a chance to rebuild and switch to HomeScreen
+      if (mounted) {
+        await Navigator.push(
+          context,
+          PageRouteBuilder(
+            pageBuilder: (_, __, ___) => const LoginSuccessScreen(),
+            transitionsBuilder: (_, anim, __, child) =>
+                FadeTransition(opacity: anim, child: child),
+            transitionDuration: const Duration(milliseconds: 400),
+          ),
+        );
       }
     } on FirebaseAuthException catch (e) {
-      kShowLoginSuccess = false; // Reset on failure
       String message = 'An error occurred.';
-      if (e.code == 'user-not-found') message = 'No account found for this email.';
-      else if (e.code == 'wrong-password') message = 'Incorrect password.';
-      else if (e.code == 'email-already-in-use') message = 'This email is already registered.';
-      else if (e.code == 'weak-password') message = 'Password must be at least 6 characters.';
-      else if (e.code == 'invalid-email') message = 'Please enter a valid email.';
+      if (e.code == 'user-not-found')
+        message = 'No account found for this email.';
+      else if (e.code == 'wrong-password')
+        message = 'Incorrect password.';
+      else if (e.code == 'email-already-in-use')
+        message = 'This email is already registered.';
+      else if (e.code == 'weak-password')
+        message = 'Password must be at least 6 characters.';
+      else if (e.code == 'invalid-email')
+        message = 'Please enter a valid email.';
+      else if (e.code == 'invalid-credential')
+        message = 'Invalid email or password.';
       _showError(message);
     } finally {
       if (mounted) setState(() => isLoading = false);
@@ -129,11 +152,13 @@ class _AuthScreenState extends State<AuthScreen>
   void _showError(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Row(children: [
-          const Icon(Icons.error_outline, color: Colors.white, size: 16),
-          const SizedBox(width: 8),
-          Expanded(child: Text(message)),
-        ]),
+        content: Row(
+          children: [
+            const Icon(Icons.error_outline, color: Colors.white, size: 16),
+            const SizedBox(width: 8),
+            Expanded(child: Text(message)),
+          ],
+        ),
         backgroundColor: Colors.red.shade600,
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -169,16 +194,16 @@ class _AuthScreenState extends State<AuthScreen>
             child: AnimatedBuilder(
               animation: _bgAnimController,
               builder: (_, __) => Transform.scale(
-                scale: 1 + 0.06 * math.sin(_bgAnimController.value * math.pi * 2),
+                scale:
+                    1 + 0.06 * math.sin(_bgAnimController.value * math.pi * 2),
                 child: Container(
                   width: 340,
                   height: 340,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    gradient: RadialGradient(colors: [
-                      _green.withOpacity(0.22),
-                      _green.withOpacity(0),
-                    ]),
+                    gradient: RadialGradient(
+                      colors: [_green.withOpacity(0.22), _green.withOpacity(0)],
+                    ),
                   ),
                 ),
               ),
@@ -192,16 +217,19 @@ class _AuthScreenState extends State<AuthScreen>
             child: AnimatedBuilder(
               animation: _bgAnimController,
               builder: (_, __) => Transform.scale(
-                scale: 1 + 0.05 * math.cos(_bgAnimController.value * math.pi * 2),
+                scale:
+                    1 + 0.05 * math.cos(_bgAnimController.value * math.pi * 2),
                 child: Container(
                   width: 280,
                   height: 280,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    gradient: RadialGradient(colors: [
-                      const Color(0xFF4CAF50).withOpacity(0.14),
-                      Colors.transparent,
-                    ]),
+                    gradient: RadialGradient(
+                      colors: [
+                        const Color(0xFF4CAF50).withOpacity(0.14),
+                        Colors.transparent,
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -213,12 +241,15 @@ class _AuthScreenState extends State<AuthScreen>
             child: SingleChildScrollView(
               physics: const BouncingScrollPhysics(),
               child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 20),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 24,
+                  vertical: 20,
+                ),
                 child: Column(
                   children: [
                     const SizedBox(height: 50),
 
-                    // ── Title  ──
+                    // ── Title ──
                     const Text(
                       'Study Buddy AI',
                       style: TextStyle(
@@ -270,7 +301,10 @@ class _AuthScreenState extends State<AuthScreen>
                       animation: _formAnimController,
                       builder: (_, child) => Transform.translate(
                         offset: Offset(0, _formSlideAnim.value),
-                        child: Opacity(opacity: _formFadeAnim.value, child: child),
+                        child: Opacity(
+                          opacity: _formFadeAnim.value,
+                          child: child,
+                        ),
                       ),
                       child: Container(
                         padding: const EdgeInsets.all(26),
@@ -296,7 +330,9 @@ class _AuthScreenState extends State<AuthScreen>
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    isLogin ? 'Welcome back 👋' : 'Create account ✨',
+                                    isLogin
+                                        ? 'Welcome back 👋'
+                                        : 'Create account ✨',
                                     style: const TextStyle(
                                       fontSize: 22,
                                       fontWeight: FontWeight.w800,
@@ -309,7 +345,9 @@ class _AuthScreenState extends State<AuthScreen>
                                         ? 'Sign in to continue your learning journey'
                                         : 'Start your AI-powered study sessions today',
                                     style: const TextStyle(
-                                        fontSize: 13, color: _textGray),
+                                      fontSize: 13,
+                                      color: _textGray,
+                                    ),
                                   ),
                                 ],
                               ),
@@ -343,12 +381,15 @@ class _AuthScreenState extends State<AuthScreen>
                             const SizedBox(height: 8),
                             _buildTextField(
                               controller: _passwordController,
-                              hint: isLogin ? 'Enter your password' : 'Create a password',
+                              hint: isLogin
+                                  ? 'Enter your password'
+                                  : 'Create a password',
                               icon: Icons.lock_outline_rounded,
                               obscure: _obscurePassword,
                               suffix: IconButton(
                                 onPressed: () => setState(
-                                    () => _obscurePassword = !_obscurePassword),
+                                  () => _obscurePassword = !_obscurePassword,
+                                ),
                                 icon: Icon(
                                   _obscurePassword
                                       ? Icons.visibility_off_rounded
@@ -368,8 +409,9 @@ class _AuthScreenState extends State<AuthScreen>
                                 onPressed: isLoading ? null : _submit,
                                 style: ElevatedButton.styleFrom(
                                   backgroundColor: _green,
-                                  disabledBackgroundColor:
-                                      _green.withOpacity(0.5),
+                                  disabledBackgroundColor: _green.withOpacity(
+                                    0.5,
+                                  ),
                                   foregroundColor: Colors.white,
                                   elevation: 0,
                                   shape: RoundedRectangleBorder(
@@ -412,7 +454,9 @@ class _AuthScreenState extends State<AuthScreen>
                                   ? "Don't have an account? "
                                   : "Already have an account? ",
                               style: const TextStyle(
-                                  color: _textGray, fontSize: 14),
+                                color: _textGray,
+                                fontSize: 14,
+                              ),
                             ),
                             TextSpan(
                               text: isLogin ? 'Sign Up' : 'Sign In',
@@ -500,8 +544,10 @@ class _AuthScreenState extends State<AuthScreen>
           prefixIcon: Icon(icon, color: _textGray, size: 20),
           suffixIcon: suffix,
           border: InputBorder.none,
-          contentPadding:
-              const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+          contentPadding: const EdgeInsets.symmetric(
+            horizontal: 16,
+            vertical: 16,
+          ),
         ),
       ),
     );
@@ -511,8 +557,11 @@ class _AuthScreenState extends State<AuthScreen>
 class _FloatingParticle {
   final double x, y, size, speed, phase;
   const _FloatingParticle({
-    required this.x, required this.y,
-    required this.size, required this.speed, required this.phase,
+    required this.x,
+    required this.y,
+    required this.size,
+    required this.speed,
+    required this.phase,
   });
 }
 
@@ -520,8 +569,11 @@ class _ParticlePainter extends CustomPainter {
   final double progress;
   final List<_FloatingParticle> particles;
   final Color color;
-  const _ParticlePainter(
-      {required this.progress, required this.particles, required this.color});
+  const _ParticlePainter({
+    required this.progress,
+    required this.particles,
+    required this.color,
+  });
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -529,7 +581,8 @@ class _ParticlePainter extends CustomPainter {
     for (final p in particles) {
       final t = (progress * p.speed + p.phase) % 1.0;
       final dy = size.height - t * size.height * 1.3;
-      final dx = size.width * p.x +
+      final dx =
+          size.width * p.x +
           math.sin(progress * math.pi * 2 * p.speed + p.phase) * 20;
       final opacity = (math.sin(t * math.pi)).clamp(0.0, 1.0) * 0.16;
       paint.color = color.withOpacity(opacity);
