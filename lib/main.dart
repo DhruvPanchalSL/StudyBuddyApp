@@ -14,17 +14,17 @@ import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import 'auth_screen.dart';
 import 'chat_screen.dart';
+import 'features/charts/visual_tools_screen.dart';
 import 'features/flashcards/flashcard_screen.dart';
 import 'history_screen.dart';
-import 'login_success_screen.dart';
 import 'models/chat_message.dart';
 import 'models/quiz_history.dart';
 import 'models/quiz_question.dart';
 import 'quiz_screen.dart';
-import 'settings_screen.dart'; // NEW IMPORT
+import 'settings_screen.dart';
 
-// Used to signal a freshlogin so the success screen is shown
-bool kShowLoginSuccess = false;
+bool kShowLoginSuccess =
+    false; // kept for AuthScreen to read, no longer used in StreamBuilder
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -52,25 +52,39 @@ class MyApp extends StatelessWidget {
           backgroundColor: Colors.transparent,
         ),
       ),
-      home: StreamBuilder(
-        stream: FirebaseAuth.instance.authStateChanges(),
-        builder: (context, snapshot) {
-          if (snapshot.connectionState == ConnectionState.active) {
-            User? user = snapshot.data;
-            if (user == null) {
-              return const AuthScreen();
-            }
-            if (kShowLoginSuccess) {
-              kShowLoginSuccess = false;
-              return const LoginSuccessScreen();
-            }
-            return const HomeScreen();
-          }
+      home: const _RootWidget(),
+    );
+  }
+}
+
+// ── Root widget — listens to auth state and navigates imperatively.
+// This avoids the StreamBuilder race where switching to HomeScreen
+// would interrupt Navigator.push(LoginSuccessScreen) mid-flight.
+class _RootWidget extends StatefulWidget {
+  const _RootWidget();
+
+  @override
+  State<_RootWidget> createState() => _RootWidgetState();
+}
+
+class _RootWidgetState extends State<_RootWidget> {
+  @override
+  Widget build(BuildContext context) {
+    return StreamBuilder<User?>(
+      stream: FirebaseAuth.instance.authStateChanges(),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting ||
+            snapshot.connectionState == ConnectionState.none) {
           return const Scaffold(
             body: Center(child: CircularProgressIndicator()),
           );
-        },
-      ),
+        }
+        // When signed out → show AuthScreen.
+        // AuthScreen handles pushing LoginSuccessScreen after login/signup
+        // and the stream will transition to HomeScreen after it pops.
+        if (snapshot.data == null) return const AuthScreen();
+        return const HomeScreen();
+      },
     );
   }
 }
@@ -83,7 +97,6 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
-  // Existing State
   String _selectedFileName = "No file selected";
   String _extractedText = "";
   String _summary = "";
@@ -98,13 +111,12 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   final TextEditingController _chatController = TextEditingController();
   bool _isSendingMessage = false;
   final ScrollController _chatScrollController = ScrollController();
-  int _currentTabIndex = 0; // 0=Summary, 1=Quiz, 2=Cards, 3=Chat
-  int _bottomNavIndex = 0; // 0=Home, 1=Library, 2=AI Tools, 3=Profile
+  int _currentTabIndex = 0;
+  int _bottomNavIndex = 0;
   late TabController _tabController;
 
   List<Map<String, dynamic>> _recentSessions = [];
 
-  // --- Structured Learning State ---
   bool _isStructuredLearningMode = false;
   List<String> _allPdfPagesText = [];
   int _pagesPerModule = 10;
@@ -113,17 +125,30 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       ? 0
       : (_allPdfPagesText.length / _pagesPerModule).ceil();
 
-  // --- NEW: API Key State ---
-  String _userApiKey = '';
+  // ── API Key State ──────────────────────────────────────────────────────────
+  String _userGeminiKey = '';
+  String _userGroqKey = '';
 
-  // Active API key getter — uses user's key if set, otherwise falls back to default
-  String get _activeApiKey {
-    final userKey = _userApiKey.trim();
+  // Gemini endpoint (user key first, then app default)
+  String get _activeGeminiKey {
+    final userKey = _userGeminiKey.trim();
     return userKey.isNotEmpty ? userKey : (dotenv.env['GEMINI_API_KEY'] ?? '');
   }
 
-  final String _geminiEndpoint =
+  // Groq endpoint (user key first, then app default)
+  String get _activeGroqKey {
+    final userKey = _userGroqKey.trim();
+    return userKey.isNotEmpty ? userKey : (dotenv.env['GROQ_API_KEY'] ?? '');
+  }
+
+  // Keep this getter so ChatScreen and other places still compile unchanged
+  String get _activeApiKey => _activeGeminiKey;
+
+  static const String _geminiEndpoint =
       'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent';
+  static const String _groqEndpoint =
+      'https://api.groq.com/openai/v1/chat/completions';
+  static const String _groqModel = 'llama-3.3-70b-versatile';
 
   // Color palette
   static const Color _green = Color(0xFF7ED957);
@@ -135,7 +160,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
   static const Color _textGray = Color(0xFF8E8E93);
   static const Color _textGrayLight = Color(0xFFC7C7CC);
 
-  // Profile Stats
   int _totalQuizzes = 0;
   double _avgScore = 0;
   int _streakDays = 0;
@@ -160,13 +184,19 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       ),
     );
 
-    _loadRecentSessions();
-    _loadProfileStats();
-    _loadUserApiKey(); // NEW
+    // Small delay to let Firebase Auth token fully propagate to Firestore
+    // before making queries — prevents PERMISSION_DENIED on first load
+    Future.delayed(const Duration(milliseconds: 800), () {
+      if (mounted) {
+        _loadRecentSessions();
+        _loadProfileStats();
+        _loadUserApiKeys();
+      }
+    });
   }
 
-  // --- NEW: Load user's saved API key from Firestore ---
-  Future<void> _loadUserApiKey() async {
+  // ── Load both keys from Firestore ─────────────────────────────────────────
+  Future<void> _loadUserApiKeys() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
     try {
@@ -176,13 +206,94 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
           .get();
       if (doc.exists) {
         setState(() {
-          _userApiKey = doc.data()?['geminiApiKey'] ?? '';
+          _userGeminiKey = doc.data()?['geminiApiKey'] ?? '';
+          _userGroqKey = doc.data()?['groqApiKey'] ?? '';
         });
       }
     } catch (e) {
-      debugPrint('Error loading user API key: $e');
+      debugPrint('Error loading user API keys: $e');
     }
   }
+
+  // ── Universal AI caller with Gemini → Groq fallback ──────────────────────
+  //
+  // Returns the response text string on success, throws on total failure.
+  Future<String> _callAI(String prompt, {int maxTokens = 2048}) async {
+    // ── Step 1: Try Gemini ──────────────────────────────────────────────────
+    final geminiKey = _activeGeminiKey;
+    if (geminiKey.isNotEmpty) {
+      try {
+        final url = Uri.parse('$_geminiEndpoint?key=$geminiKey');
+        final response = await http.post(
+          url,
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            "contents": [
+              {
+                "parts": [
+                  {"text": prompt},
+                ],
+              },
+            ],
+            "generationConfig": {
+              "temperature": 0.7,
+              "maxOutputTokens": maxTokens,
+            },
+          }),
+        );
+
+        if (response.statusCode == 200) {
+          final json = jsonDecode(response.body);
+          return json['candidates'][0]['content']['parts'][0]['text'] as String;
+        } else if (response.statusCode == 429) {
+          // Rate limited → fall through to Groq
+          debugPrint('Gemini rate limited (429), falling back to Groq...');
+        } else {
+          throw Exception('Gemini API Error: ${response.statusCode}');
+        }
+      } catch (e) {
+        if (e.toString().contains('Gemini API Error')) rethrow;
+        debugPrint('Gemini call failed: $e — falling back to Groq');
+      }
+    }
+
+    // ── Step 2: Fallback to Groq ────────────────────────────────────────────
+    final groqKey = _activeGroqKey;
+    if (groqKey.isEmpty) {
+      throw Exception(
+        'All AI keys exhausted. Please add a Groq API key in Settings.',
+      );
+    }
+
+    final groqResponse = await http.post(
+      Uri.parse(_groqEndpoint),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $groqKey',
+      },
+      body: jsonEncode({
+        "model": _groqModel,
+        "messages": [
+          {"role": "user", "content": prompt},
+        ],
+        "max_tokens": maxTokens,
+        "temperature": 0.7,
+      }),
+    );
+
+    if (groqResponse.statusCode == 200) {
+      final json = jsonDecode(groqResponse.body);
+      return json['choices'][0]['message']['content'] as String;
+    } else if (groqResponse.statusCode == 429) {
+      throw Exception(
+        '⏳ Both Gemini and Groq are rate limited. Please wait a moment.',
+      );
+    } else {
+      throw Exception('Groq API Error: ${groqResponse.statusCode}');
+    }
+  }
+
+  // ── Profile / session loaders ──────────────────────────────────────────────
 
   Future<void> _loadProfileStats() async {
     final user = FirebaseAuth.instance.currentUser;
@@ -224,7 +335,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       if (!activity.containsKey(checkDate)) {
         checkDate = checkDate.subtract(const Duration(days: 1));
       }
-
       while (activity.containsKey(checkDate)) {
         streak++;
         checkDate = checkDate.subtract(const Duration(days: 1));
@@ -292,6 +402,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     super.dispose();
   }
 
+  // ── PDF helpers ────────────────────────────────────────────────────────────
+
   Future<void> _pickAndReadPDF({
     Future<void> Function()? onComplete,
     bool isStructured = false,
@@ -339,21 +451,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
             _extractedText = _allPdfPagesText.join('\n');
             _bottomNavIndex = 2;
           });
-          if (onComplete != null) {
-            await onComplete();
-          }
+          if (onComplete != null) await onComplete();
         }
       } else {
-        setState(() {
-          _selectedFileName = "No file selected";
-        });
+        setState(() => _selectedFileName = "No file selected");
       }
     } catch (e) {
       setState(() {
         _isLoading = false;
         _extractedText = "Error reading PDF: $e";
       });
-      debugPrint("Error: $e");
     }
   }
 
@@ -427,13 +534,9 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                         ),
                         onPressed: () {
                           Navigator.pop(context);
-                          setState(() {
-                            _pagesPerModule = pagesPerModule;
-                          });
+                          setState(() => _pagesPerModule = pagesPerModule);
                           _loadModule(nextModuleIndex);
-                          setState(() {
-                            _bottomNavIndex = 2;
-                          });
+                          setState(() => _bottomNavIndex = 2);
                         },
                         child: const Text('Resume Next Module'),
                       ),
@@ -455,18 +558,16 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 
   void _loadModule(int moduleIndex) {
     if (_allPdfPagesText.isEmpty) return;
-
     int startIndex = moduleIndex * _pagesPerModule;
-    int endIndex = startIndex + _pagesPerModule;
-    if (endIndex > _allPdfPagesText.length) {
-      endIndex = _allPdfPagesText.length;
-    }
-
-    final modulePagesText = _allPdfPagesText.sublist(startIndex, endIndex);
-
+    int endIndex = (startIndex + _pagesPerModule).clamp(
+      0,
+      _allPdfPagesText.length,
+    );
     setState(() {
       _currentModuleIndex = moduleIndex;
-      _extractedText = modulePagesText.join('\n');
+      _extractedText = _allPdfPagesText
+          .sublist(startIndex, endIndex)
+          .join('\n');
       _summary = "";
       _quizQuestions = [];
     });
@@ -477,10 +578,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     try {
       File file = File(filePath);
       List<int> bytes = await file.readAsBytes();
-
       PdfDocument document = PdfDocument(inputBytes: bytes);
       PdfTextExtractor extractor = PdfTextExtractor(document);
-
       for (int i = 0; i < document.pages.count; i++) {
         String pageText = extractor.extractText(
           startPageIndex: i,
@@ -488,7 +587,6 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
         );
         pagesText.add("--- Page ${i + 1} ---\n$pageText\n");
       }
-
       document.dispose();
       return pagesText;
     } catch (e) {
@@ -498,6 +596,8 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
     }
   }
 
+  // ── AI Feature Methods ─────────────────────────────────────────────────────
+
   Future<void> _generateSummary() async {
     if (_extractedText.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
@@ -506,77 +606,69 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       return;
     }
 
-    setState(() {
-      _isGeneratingSummary = true;
-    });
+    setState(() => _isGeneratingSummary = true);
 
     try {
-      // UPDATED: Use _activeApiKey instead of dotenv directly
-      String apiKey = _activeApiKey;
-      if (apiKey.isEmpty) {
-        throw Exception('No API key found. Please add one in Settings.');
-      }
-
-      final url = Uri.parse('$_geminiEndpoint?key=$apiKey');
-
       String textToSummarize = _extractedText;
-      if (textToSummarize.length > 100000) {
+
+      // Determine document size tier
+      final charCount = textToSummarize.length;
+      final isLarge = charCount > 20000; // ~10+ pages
+      final isHuge = charCount > 60000; // ~30+ pages
+
+      if (isHuge) {
         textToSummarize =
-            textToSummarize.substring(0, 100000) +
-            "\n\n[Note: Text truncated due to length...]";
+            textToSummarize.substring(0, 60000) +
+            "\n\n[Document truncated for analysis — showing first ~30 pages]";
       }
 
-      String prompt =
-          '''Please provide a highly detailed, professional, and structured analysis of the following text. 
-Use these exact section headers for organization:
+      // Adaptive instructions per size tier
+      final executiveSummaryInstruction = isLarge
+          ? 'Write 2-3 concise paragraphs covering the document\'s purpose, main argument, and key conclusions. Keep it high-level — no page-by-page breakdown.'
+          : 'Write a comprehensive 3-4 paragraph overview of the document\'s purpose, core thesis, and main conclusions.';
+
+      final analysisInstruction = isLarge
+          ? 'Identify the 3-5 most critical concepts or arguments. For each, write 1-2 sentences on why it matters. Do NOT analyze individual pages — focus on big-picture insights only.'
+          : 'A deep dive into specific details, data points, or technical explanations. Break down complex ideas into manageable parts.';
+
+      final themesInstruction = isLarge
+          ? 'List 4-5 major themes as short bullet points with a single sentence each.'
+          : 'Identify 5-7 important themes. For each, provide a brief explanation of its significance.';
+
+      final prompt =
+          '''Analyze the following document and respond using exactly these section headers. IMPORTANT: Do NOT use square brackets anywhere in your content — only use them for the section headers below.
+
+${isLarge ? 'NOTE: This is a large document. Keep each section concise and high-level. Do NOT do a page-by-page analysis.' : ''}
 
 [EXECUTIVE_SUMMARY]
-(A comprehensive 2-3 paragraph overview of the document's purpose, core thesis, and main conclusions. This should be a self-contained summary.)
+($executiveSummaryInstruction)
 
 [KEY_THEMES_AND_CONCEPTS]
-(Identify the 5-7 most important themes, concepts, or arguments presented. For each, provide a brief explanation of its significance within the text.)
+($themesInstruction)
 
 [DETAILED_ANALYSIS]
-(A deep dive into the specific details, data points, or technical explanations. Break down complex ideas into manageable parts.)
+($analysisInstruction)
 
 [PRACTICAL_APPLICATIONS]
-(Explain how the information in this document can be applied in real-world scenarios, professional contexts, or further study.)
+(${isLarge ? 'List 3 practical takeaways in bullet points.' : 'Explain how the information can be applied in real-world scenarios, professional contexts, or further study.'})
 
 [STUDY_GUIDE_AND_REFLECTIONS]
-(Provide 3-5 thought-provoking questions or areas for further reflection based on the text to help the reader consolidate their learning.)
+(Provide ${isLarge ? '3' : '4-5'} thought-provoking questions for further reflection.)
 
 Text to analyze:
 $textToSummarize''';
 
-      final requestBody = {
-        "contents": [
-          {
-            "parts": [
-              {"text": prompt},
-            ],
-          },
-        ],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 2048},
-      };
+      final tokens = isHuge ? 2048 : (isLarge ? 2560 : 4096);
+      final summary = await _callAI(prompt, maxTokens: tokens);
 
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(requestBody),
-      );
+      setState(() {
+        _summary = summary;
+        _isGeneratingSummary = false;
+      });
 
-      if (response.statusCode == 200) {
-        final jsonResponse = jsonDecode(response.body);
-        final summary =
-            jsonResponse['candidates'][0]['content']['parts'][0]['text'];
+      _tabController.animateTo(0);
 
-        setState(() {
-          _summary = summary;
-          _isGeneratingSummary = false;
-        });
-
-        _tabController.animateTo(0);
-
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('✅ Summary generated (${summary.length} chars)'),
@@ -587,24 +679,24 @@ $textToSummarize''';
             ),
           ),
         );
-      } else {
-        throw Exception('API Error: ${response.statusCode}');
       }
     } catch (e) {
       setState(() {
         _isGeneratingSummary = false;
         _summary = "Error generating summary: $e";
       });
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error: $e'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: Colors.red,
+            behavior: SnackBarBehavior.floating,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(10),
+            ),
           ),
-        ),
-      );
+        );
+      }
     }
   }
 
@@ -623,14 +715,6 @@ $textToSummarize''';
     });
 
     try {
-      // UPDATED: Use _activeApiKey instead of dotenv directly
-      String apiKey = _activeApiKey;
-      if (apiKey.isEmpty) {
-        throw Exception('No API key found. Please add one in Settings.');
-      }
-
-      final url = Uri.parse('$_geminiEndpoint?key=$apiKey');
-
       String textForQuiz = _extractedText;
       if (textForQuiz.length > 25000) {
         textForQuiz =
@@ -638,7 +722,7 @@ $textToSummarize''';
             "\n\n[Note: Text truncated for quiz generation...]";
       }
 
-      String prompt =
+      final prompt =
           '''Based on the following text, generate $count multiple choice quiz questions.
 Each question should have 4 options (A, B, C, D) with exactly one correct answer.
 Include a brief explanation for why the correct answer is right.
@@ -662,430 +746,87 @@ IMPORTANT:
 - difficulty must be "EASY", "MEDIUM", or "HARD"
 - Make questions challenging but fair
 - Base questions strictly on the provided text
+- Return ONLY the JSON, no extra text
 
 TEXT:
 $textForQuiz
 
 JSON RESPONSE:''';
 
-      final requestBody = {
-        "contents": [
-          {
-            "parts": [
-              {"text": prompt},
-            ],
-          },
-        ],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 4096},
-      };
+      final responseText = await _callAI(prompt, maxTokens: 4096);
 
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(requestBody),
-      );
+      RegExp jsonRegex = RegExp(r'\{[\s\S]*\}');
+      Match? match = jsonRegex.firstMatch(responseText);
 
-      if (response.statusCode == 200) {
-        final jsonResponse = jsonDecode(response.body);
-        String responseText =
-            jsonResponse['candidates'][0]['content']['parts'][0]['text'];
+      if (match != null) {
+        final quizData = jsonDecode(match.group(0)!);
+        if (quizData['questions'] != null && quizData['questions'].isNotEmpty) {
+          List<QuizQuestion> questions = (quizData['questions'] as List)
+              .map((q) => QuizQuestion.fromJson(q))
+              .toList();
 
-        RegExp jsonRegex = RegExp(r'\{[\s\S]*\}');
-        Match? match = jsonRegex.firstMatch(responseText);
+          setState(() {
+            _quizQuestions = questions;
+            _isGeneratingQuiz = false;
+          });
 
-        if (match != null) {
-          String jsonStr = match.group(0)!;
-          final quizData = jsonDecode(jsonStr);
+          if (mounted) {
+            Navigator.push(
+              context,
+              MaterialPageRoute(
+                builder: (context) => QuizScreen(
+                  questions: questions,
+                  pdfName: _selectedFileName,
+                  chapterTitle: 'Document Review',
+                  onQuizComplete: (score, completedQuestions, timeTaken) {
+                    setState(() {
+                      _quizScore = score;
+                      _showQuizResults = true;
+                    });
 
-          if (quizData['questions'] != null &&
-              quizData['questions'].isNotEmpty) {
-            List<QuizQuestion> questions = [];
-            for (var q in quizData['questions']) {
-              questions.add(QuizQuestion.fromJson(q));
-            }
-
-            setState(() {
-              _quizQuestions = questions;
-              _isGeneratingQuiz = false;
-            });
-
-            if (mounted) {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => QuizScreen(
-                    questions: questions,
-                    pdfName: _selectedFileName,
-                    chapterTitle: 'Document Review',
-                    onQuizComplete: (score, completedQuestions, timeTaken) {
-                      setState(() {
-                        _quizScore = score;
-                        _showQuizResults = true;
-                      });
-
-                      final Map<String, dynamic> diffAnalysis = {
-                        'EASY': {'total': 0, 'correct': 0},
-                        'MEDIUM': {'total': 0, 'correct': 0},
-                        'HARD': {'total': 0, 'correct': 0},
-                      };
-                      for (var q in completedQuestions) {
-                        final d = q.difficulty.toUpperCase();
-                        if (diffAnalysis.containsKey(d)) {
-                          diffAnalysis[d]!['total'] =
-                              (diffAnalysis[d]!['total'] ?? 0) + 1;
-                          if (q.isCorrect) {
-                            diffAnalysis[d]!['correct'] =
-                                (diffAnalysis[d]!['correct'] ?? 0) + 1;
-                          }
+                    final Map<String, dynamic> diffAnalysis = {
+                      'EASY': {'total': 0, 'correct': 0},
+                      'MEDIUM': {'total': 0, 'correct': 0},
+                      'HARD': {'total': 0, 'correct': 0},
+                    };
+                    for (var q in completedQuestions) {
+                      final d = q.difficulty.toUpperCase();
+                      if (diffAnalysis.containsKey(d)) {
+                        diffAnalysis[d]!['total'] =
+                            (diffAnalysis[d]!['total'] ?? 0) + 1;
+                        if (q.isCorrect) {
+                          diffAnalysis[d]!['correct'] =
+                              (diffAnalysis[d]!['correct'] ?? 0) + 1;
                         }
                       }
-
-                      _saveQuizToHistory(timeTaken, diffAnalysis);
-                    },
-                  ),
+                    }
+                    _saveQuizToHistory(timeTaken, diffAnalysis);
+                  },
                 ),
-              );
-            }
-          } else {
-            throw Exception('No questions in response');
+              ),
+            );
           }
         } else {
-          throw Exception('Could not parse quiz JSON');
+          throw Exception('No questions in response');
         }
-      } else if (response.statusCode == 429) {
-        setState(() => _isGeneratingQuiz = false);
+      } else {
+        throw Exception('Could not parse quiz JSON');
+      }
+    } catch (e) {
+      setState(() => _isGeneratingQuiz = false);
+      if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: const Text(
-              '⏳ Rate limit reached. Please wait a minute and try again.',
-            ),
-            backgroundColor: Colors.orange,
+            content: Text('Error generating quiz: $e'),
+            backgroundColor: Colors.red,
             behavior: SnackBarBehavior.floating,
             shape: RoundedRectangleBorder(
               borderRadius: BorderRadius.circular(10),
             ),
           ),
         );
-      } else {
-        throw Exception('API Error: ${response.statusCode}');
       }
-    } catch (e) {
-      setState(() => _isGeneratingQuiz = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Error generating quiz: $e'),
-          backgroundColor: Colors.red,
-          behavior: SnackBarBehavior.floating,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(10),
-          ),
-        ),
-      );
     }
-  }
-
-  Future<void> _showStructuredConfigSheet() async {
-    int selectedPages = 10;
-    return showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      isDismissible: false,
-      enableDrag: false,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setSheetState) => Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
-          ),
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 24),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              Row(
-                children: [
-                  Icon(
-                    Icons.view_module_rounded,
-                    color: Colors.purple.shade400,
-                    size: 28,
-                  ),
-                  const SizedBox(width: 12),
-                  const Text(
-                    'Structured Learning',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      color: _textDark,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Pages per Module',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: _textDark,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Divide your document into bite-sized segments (1-50 pages).',
-                  style: TextStyle(fontSize: 13, color: _textGray),
-                ),
-              ),
-              const SizedBox(height: 32),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _buildCountButton(setSheetState, selectedPages, (val) {
-                    setSheetState(() => selectedPages = val);
-                  }, maxVal: 50),
-                  Text(
-                    '$selectedPages',
-                    style: TextStyle(
-                      fontSize: 48,
-                      fontWeight: FontWeight.w900,
-                      color: Colors.purple.shade400,
-                    ),
-                  ),
-                  _buildCountButton(
-                    setSheetState,
-                    selectedPages,
-                    (val) {
-                      setSheetState(() => selectedPages = val);
-                    },
-                    isAdd: true,
-                    maxVal: 50,
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  activeTrackColor: Colors.purple.shade400,
-                  inactiveTrackColor: Colors.purple.shade100,
-                  thumbColor: Colors.purple.shade400,
-                  overlayColor: Colors.purple.withOpacity(0.2),
-                  valueIndicatorColor: _textDark,
-                  trackHeight: 6,
-                ),
-                child: Slider(
-                  value: selectedPages.toDouble(),
-                  min: 1,
-                  max: 50,
-                  divisions: 49,
-                  label: selectedPages.toString(),
-                  onChanged: (value) {
-                    setSheetState(() => selectedPages = value.round());
-                  },
-                ),
-              ),
-              const SizedBox(height: 32),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: () {
-                    setState(() {
-                      _pagesPerModule = selectedPages;
-                      _bottomNavIndex = 2;
-                    });
-                    _loadModule(0);
-                    Navigator.pop(context);
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.purple.shade400,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    elevation: 0,
-                  ),
-                  child: const Text(
-                    'Start Learning',
-                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showQuizConfigSheet() async {
-    int selectedCount = 5;
-    return showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (context) => StatefulBuilder(
-        builder: (context, setSheetState) => Container(
-          decoration: const BoxDecoration(
-            color: Colors.white,
-            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
-          ),
-          padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 24),
-                decoration: BoxDecoration(
-                  color: Colors.grey.shade300,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-              const Row(
-                children: [
-                  Icon(Icons.quiz_rounded, color: _green, size: 28),
-                  SizedBox(width: 12),
-                  Text(
-                    'Quiz Settings',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      color: _textDark,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 24),
-              const Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Number of Questions',
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: _textDark,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 8),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: Text(
-                  'Choose how many questions you want to solve (1-15)',
-                  style: TextStyle(fontSize: 13, color: _textGray),
-                ),
-              ),
-              const SizedBox(height: 32),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  _buildCountButton(setSheetState, selectedCount, (val) {
-                    setSheetState(() => selectedCount = val);
-                  }),
-                  Text(
-                    '$selectedCount',
-                    style: const TextStyle(
-                      fontSize: 48,
-                      fontWeight: FontWeight.w900,
-                      color: _green,
-                    ),
-                  ),
-                  _buildCountButton(setSheetState, selectedCount, (val) {
-                    setSheetState(() => selectedCount = val);
-                  }, isAdd: true),
-                ],
-              ),
-              const SizedBox(height: 16),
-              SliderTheme(
-                data: SliderTheme.of(context).copyWith(
-                  activeTrackColor: _green,
-                  inactiveTrackColor: _green.withOpacity(0.1),
-                  thumbColor: _green,
-                  overlayColor: _green.withOpacity(0.2),
-                  valueIndicatorColor: _textDark,
-                  trackHeight: 6,
-                ),
-                child: Slider(
-                  value: selectedCount.toDouble(),
-                  min: 1,
-                  max: 15,
-                  divisions: 14,
-                  label: selectedCount.toString(),
-                  onChanged: (val) {
-                    setSheetState(() => selectedCount = val.toInt());
-                  },
-                ),
-              ),
-              const SizedBox(height: 40),
-              SizedBox(
-                width: double.infinity,
-                height: 56,
-                child: ElevatedButton(
-                  onPressed: () {
-                    Navigator.pop(context);
-                    _generateQuiz(count: selectedCount);
-                  },
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _green,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                  ),
-                  child: const Text(
-                    'Start Generating',
-                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
-                  ),
-                ),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCountButton(
-    void Function(void Function()) setSheetState,
-    int current,
-    void Function(int) onChanged, {
-    bool isAdd = false,
-    int maxVal = 15,
-  }) {
-    bool disabled = isAdd ? current >= maxVal : current <= 1;
-    return GestureDetector(
-      onTap: disabled
-          ? null
-          : () => onChanged(isAdd ? current + 1 : current - 1),
-      child: Container(
-        width: 50,
-        height: 50,
-        decoration: BoxDecoration(
-          color: disabled ? Colors.grey.shade100 : _green.withOpacity(0.1),
-          borderRadius: BorderRadius.circular(15),
-        ),
-        child: Icon(
-          isAdd ? Icons.add_rounded : Icons.remove_rounded,
-          color: disabled ? Colors.grey.shade300 : _green,
-          size: 28,
-        ),
-      ),
-    );
   }
 
   Future<void> _sendMessage() async {
@@ -1104,14 +845,6 @@ JSON RESPONSE:''';
     _scrollToBottom();
 
     try {
-      // UPDATED: Use _activeApiKey instead of dotenv directly
-      String apiKey = _activeApiKey;
-      if (apiKey.isEmpty) {
-        throw Exception('No API key found. Please add one in Settings.');
-      }
-
-      final url = Uri.parse('$_geminiEndpoint?key=$apiKey');
-
       String context = _summary.isNotEmpty ? _summary : _extractedText;
 
       if (context.isEmpty) {
@@ -1130,9 +863,11 @@ JSON RESPONSE:''';
         return;
       }
 
-      if (context.length > 20000) context = context.substring(0, 20000) + "...";
+      if (context.length > 20000) {
+        context = context.substring(0, 20000) + "...";
+      }
 
-      String prompt =
+      final prompt =
           '''You are a helpful study assistant. Answer the user's question based ONLY on the following context.
 If the answer cannot be found in the context, say "I don't have enough information about that in the document."
 
@@ -1143,58 +878,24 @@ USER QUESTION: $userMessage
 
 ANSWER (be concise but helpful):''';
 
-      final requestBody = {
-        "contents": [
-          {
-            "parts": [
-              {"text": prompt},
-            ],
-          },
-        ],
-        "generationConfig": {"temperature": 0.7, "maxOutputTokens": 1024},
-      };
+      final aiResponse = await _callAI(prompt, maxTokens: 1024);
 
-      final response = await http.post(
-        url,
-        headers: {'Content-Type': 'application/json'},
-        body: jsonEncode(requestBody),
-      );
-
-      if (response.statusCode == 200) {
-        final jsonResponse = jsonDecode(response.body);
-        String aiResponse =
-            jsonResponse['candidates'][0]['content']['parts'][0]['text'];
-        setState(() {
-          _chatMessages.add(
-            ChatMessage(
-              text: aiResponse,
-              isUser: false,
-              timestamp: DateTime.now(),
-            ),
-          );
-          _isSendingMessage = false;
-        });
-      } else if (response.statusCode == 429) {
-        setState(() {
-          _chatMessages.add(
-            ChatMessage(
-              text:
-                  "⏳ Rate limit reached. Please wait a minute before sending more messages.",
-              isUser: false,
-              timestamp: DateTime.now(),
-            ),
-          );
-          _isSendingMessage = false;
-        });
-      } else {
-        throw Exception('API Error: ${response.statusCode}');
-      }
+      setState(() {
+        _chatMessages.add(
+          ChatMessage(
+            text: aiResponse,
+            isUser: false,
+            timestamp: DateTime.now(),
+          ),
+        );
+        _isSendingMessage = false;
+      });
     } catch (e) {
       setState(() {
         _chatMessages.add(
           ChatMessage(
             text:
-                "Sorry, I encountered an error: ${e.toString().substring(0, e.toString().length.clamp(0, 100))}",
+                "Sorry, I encountered an error: ${e.toString().substring(0, e.toString().length.clamp(0, 120))}",
             isUser: false,
             timestamp: DateTime.now(),
           ),
@@ -1334,6 +1035,8 @@ ANSWER (be concise but helpful):''';
     }
   }
 
+  // ── Build ──────────────────────────────────────────────────────────────────
+
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
@@ -1367,9 +1070,7 @@ ANSWER (be concise but helpful):''';
           onTabChange: (index) => setState(() => _bottomNavIndex = index),
         );
       case 2:
-        if (_extractedText.isEmpty) {
-          return _buildNoDocumentState();
-        }
+        if (_extractedText.isEmpty) return _buildNoDocumentState();
         return _buildAiToolsTab();
       case 3:
         return _buildProfileTab();
@@ -1429,9 +1130,7 @@ ANSWER (be concise but helpful):''';
     );
   }
 
-  Widget _buildLearningTab() {
-    return _buildChatTab();
-  }
+  Widget _buildLearningTab() => _buildChatTab();
 
   Widget _buildProfileTab() {
     final user = FirebaseAuth.instance.currentUser;
@@ -1443,7 +1142,6 @@ ANSWER (be concise but helpful):''';
       padding: const EdgeInsets.all(20),
       child: Column(
         children: [
-          // Profile Header
           Container(
             padding: const EdgeInsets.all(24),
             decoration: BoxDecoration(
@@ -1486,8 +1184,6 @@ ANSWER (be concise but helpful):''';
             ),
           ),
           const SizedBox(height: 20),
-
-          // Activity Graph Section
           Container(
             width: double.infinity,
             padding: const EdgeInsets.all(20),
@@ -1520,24 +1216,69 @@ ANSWER (be concise but helpful):''';
             ),
           ),
           const SizedBox(height: 20),
-
-          // UPDATED: Settings now navigates to SettingsScreen
           _buildProfileAction(Icons.settings_outlined, 'Settings', () async {
             await Navigator.push(
               context,
               MaterialPageRoute(
                 builder: (context) => SettingsScreen(
-                  currentApiKey: _userApiKey,
-                  onApiKeyChanged: (newKey) {
-                    setState(() => _userApiKey = newKey);
-                  },
+                  currentGeminiKey: _userGeminiKey,
+                  currentGroqKey: _userGroqKey,
+                  onGeminiKeyChanged: (k) => setState(() => _userGeminiKey = k),
+                  onGroqKeyChanged: (k) => setState(() => _userGroqKey = k),
                 ),
               ),
             );
           }),
           _buildProfileAction(Icons.help_outline, 'Help Center', () {}),
           _buildProfileAction(Icons.logout, 'Log out', () async {
-            await FirebaseAuth.instance.signOut();
+            final confirm = await showDialog<bool>(
+              context: context,
+              builder: (ctx) => AlertDialog(
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                title: const Text(
+                  'Log out?',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                content: const Text('Are you sure you want to log out?'),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(ctx, false),
+                    child: const Text(
+                      'Cancel',
+                      style: TextStyle(color: Colors.grey),
+                    ),
+                  ),
+                  ElevatedButton(
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Colors.red,
+                      foregroundColor: Colors.white,
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    onPressed: () => Navigator.pop(ctx, true),
+                    child: const Text('Log out'),
+                  ),
+                ],
+              ),
+            );
+            if (confirm == true) {
+              try {
+                await FirebaseAuth.instance.signOut();
+              } catch (e) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text('Logout failed: $e'),
+                      backgroundColor: Colors.red,
+                      behavior: SnackBarBehavior.floating,
+                    ),
+                  );
+                }
+              }
+            }
           }, color: Colors.red),
         ],
       ),
@@ -1605,7 +1346,6 @@ ANSWER (be concise but helpful):''';
   Widget _buildActivityGraph() {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
-
     final startDate = today.subtract(
       Duration(days: today.weekday % 7 + (11 * 7)),
     );
@@ -1779,9 +1519,59 @@ ANSWER (be concise but helpful):''';
                         color: Colors.red.shade400,
                         size: 22,
                       ),
-                      onPressed: () async =>
-                          await FirebaseAuth.instance.signOut(),
                       tooltip: 'Logout',
+                      onPressed: () async {
+                        final confirm = await showDialog<bool>(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                            title: const Text(
+                              'Log out?',
+                              style: TextStyle(fontWeight: FontWeight.w700),
+                            ),
+                            content: const Text(
+                              'Are you sure you want to log out?',
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(ctx, false),
+                                child: const Text(
+                                  'Cancel',
+                                  style: TextStyle(color: Colors.grey),
+                                ),
+                              ),
+                              ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.red,
+                                  foregroundColor: Colors.white,
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                ),
+                                onPressed: () => Navigator.pop(ctx, true),
+                                child: const Text('Log out'),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (confirm == true) {
+                          try {
+                            await FirebaseAuth.instance.signOut();
+                          } catch (e) {
+                            if (mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Logout failed: $e'),
+                                  backgroundColor: Colors.red,
+                                  behavior: SnackBarBehavior.floating,
+                                ),
+                              );
+                            }
+                          }
+                        }
+                      },
                     ),
                   ],
                 ),
@@ -1893,84 +1683,142 @@ ANSWER (be concise but helpful):''';
   Widget _buildAISectionHeader() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            'Unlock the power of your documents',
-            style: TextStyle(fontSize: 14, color: _textGray),
-          ),
-        ],
+      child: Text(
+        'Unlock the power of your documents',
+        style: TextStyle(fontSize: 14, color: _textGray),
       ),
     );
   }
 
   Widget _buildToolGrid() {
+    final cards = [
+      _ToolCardData(
+        'Smart\nSummary',
+        'Analytical breakdown',
+        Icons.summarize_rounded,
+        const Color(0xFF6366F1),
+        0,
+        _generateSummary,
+      ),
+      _ToolCardData(
+        'Smart\nQuiz',
+        'Test your knowledge',
+        Icons.quiz_rounded,
+        const Color(0xFFF59E0B),
+        1,
+        _showQuizConfigSheet,
+      ),
+      _ToolCardData(
+        'Smart\nCards',
+        'Flashcard system',
+        Icons.bolt_rounded,
+        const Color(0xFF8B5CF6),
+        2,
+        () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => FlashcardScreen(
+                documentText: _extractedText,
+                documentName: _selectedFileName,
+                activeGeminiKey: _activeGeminiKey,
+                activeGroqKey: _activeGroqKey,
+              ),
+            ),
+          );
+        },
+      ),
+      _ToolCardData(
+        'Smart\nChat',
+        'Q&A Assistant',
+        Icons.chat_bubble_rounded,
+        const Color(0xFF10B981),
+        3,
+        () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => ChatScreen(
+                extractedText: _extractedText,
+                summary: _summary,
+                documentName: _selectedFileName,
+                activeGeminiKey: _activeGeminiKey,
+                activeGroqKey: _activeGroqKey,
+              ),
+            ),
+          );
+        },
+      ),
+      _ToolCardData(
+        'Mind\nMap',
+        'Visual concept map',
+        Icons.hub_rounded,
+        const Color(0xFFEC4899),
+        4,
+        () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => VisualToolsScreen(
+                documentText: _extractedText,
+                documentName: _selectedFileName,
+                activeGeminiKey: _activeGeminiKey,
+                activeGroqKey: _activeGroqKey,
+                initialTab: 0,
+              ),
+            ),
+          );
+        },
+      ),
+      _ToolCardData(
+        'Flow\nChart',
+        'Step-by-step flow',
+        Icons.account_tree_rounded,
+        const Color(0xFF0EA5E9),
+        5,
+        () {
+          Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (_) => VisualToolsScreen(
+                documentText: _extractedText,
+                documentName: _selectedFileName,
+                activeGeminiKey: _activeGeminiKey,
+                activeGroqKey: _activeGroqKey,
+                initialTab: 1,
+              ),
+            ),
+          );
+        },
+      ),
+    ];
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
-      child: GridView.count(
-        shrinkWrap: true,
-        physics: const NeverScrollableScrollPhysics(),
-        crossAxisCount: 2,
-        mainAxisSpacing: 16,
-        crossAxisSpacing: 16,
-        childAspectRatio: 1.4,
-        children: [
-          _buildToolCard(
-            'Smart\nSummary',
-            'Analytical breakdown',
-            Icons.summarize_rounded,
-            const Color(0xFF6366F1),
-            0,
-            _generateSummary,
-          ),
-          _buildToolCard(
-            'Smart\nQuiz',
-            'Test your knowledge',
-            Icons.quiz_rounded,
-            const Color(0xFFF59E0B),
-            1,
-            _showQuizConfigSheet,
-          ),
-          _buildToolCard(
-            'Smart\nCards',
-            'Flashcard system',
-            Icons.bolt_rounded,
-            const Color(0xFF8B5CF6),
-            2,
-            () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => FlashcardScreen(
-                    documentText: _extractedText,
-                    documentName: _selectedFileName,
-                  ),
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final cardWidth = (constraints.maxWidth - 16) / 2;
+          // Card height scales with width but has a min/max clamp for all screen sizes
+          final cardHeight = (cardWidth * 0.72).clamp(100.0, 160.0);
+          return Wrap(
+            spacing: 16,
+            runSpacing: 16,
+            children: cards.map((card) {
+              return SizedBox(
+                width: cardWidth,
+                height: cardHeight,
+                child: _buildToolCard(
+                  card.title,
+                  card.subtitle,
+                  card.icon,
+                  card.color,
+                  card.index,
+                  card.onTap,
                 ),
               );
-            },
-          ),
-          _buildToolCard(
-            'Smart\nChat',
-            'Q&A Assistant',
-            Icons.chat_bubble_rounded,
-            const Color(0xFF10B981),
-            3,
-            () {
-              Navigator.push(
-                context,
-                MaterialPageRoute(
-                  builder: (context) => ChatScreen(
-                    extractedText: _extractedText,
-                    summary: _summary,
-                    documentName: _selectedFileName,
-                    activeApiKey: _activeApiKey, // passes user or default key
-                  ),
-                ),
-              );
-            },
-          ),
-        ],
+            }).toList(),
+          );
+        },
       ),
     );
   }
@@ -1983,22 +1831,24 @@ ANSWER (be concise but helpful):''';
     int index,
     VoidCallback onTap,
   ) {
-    bool isSelected = _currentTabIndex == index;
     return GestureDetector(
-      onTap: () {
-        setState(() => _currentTabIndex = index);
-        onTap();
-      },
+      onTap: onTap, // ✅ directly call action — no _currentTabIndex mutation
       child: AnimatedContainer(
-        duration: const Duration(milliseconds: 250),
-        padding: const EdgeInsets.all(16),
+        duration: const Duration(milliseconds: 200),
+        width: double.infinity,
+        height: double.infinity,
+        padding: const EdgeInsets.all(14),
         decoration: BoxDecoration(
           color: color.withOpacity(0.08),
-          borderRadius: BorderRadius.circular(24),
-          border: Border.all(
-            color: isSelected ? color : Colors.transparent,
-            width: 2,
-          ),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(color: color.withOpacity(0.25), width: 1.5),
+          boxShadow: [
+            BoxShadow(
+              color: color.withOpacity(0.08),
+              blurRadius: 8,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2010,7 +1860,7 @@ ANSWER (be concise but helpful):''';
                 color: color.withOpacity(0.15),
                 shape: BoxShape.circle,
               ),
-              child: Icon(icon, color: color, size: 22),
+              child: Icon(icon, color: color, size: 20),
             ),
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -2018,7 +1868,7 @@ ANSWER (be concise but helpful):''';
                 Text(
                   title,
                   style: TextStyle(
-                    fontSize: 15,
+                    fontSize: 14,
                     fontWeight: FontWeight.w800,
                     color: color.withOpacity(0.9),
                     height: 1.2,
@@ -2032,6 +1882,8 @@ ANSWER (be concise but helpful):''';
                     color: color.withOpacity(0.6),
                     fontWeight: FontWeight.w600,
                   ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
                 ),
               ],
             ),
@@ -2066,17 +1918,14 @@ ANSWER (be concise but helpful):''';
       );
     }
 
-    if (_summary.isEmpty && _currentTabIndex == 0) {
-      return const Center(child: Text("Select a tool above to get started"));
-    }
-
-    if (_currentTabIndex == 0 && _summary.isNotEmpty) {
+    if (_summary.isNotEmpty) {
       return _buildSummaryTab();
     }
 
+    // Default idle state — just show a soft prompt
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(40),
+        padding: const EdgeInsets.fromLTRB(40, 8, 40, 40),
         child: Column(
           children: [
             Icon(
@@ -2086,7 +1935,7 @@ ANSWER (be concise but helpful):''';
             ),
             const SizedBox(height: 16),
             const Text(
-              "Result will appear here",
+              "Tap a tool above to get started",
               textAlign: TextAlign.center,
               style: TextStyle(color: Colors.grey),
             ),
@@ -2168,64 +2017,25 @@ ANSWER (be concise but helpful):''';
             style: TextStyle(fontSize: 13, color: _textGray, height: 1.5),
           ),
           const SizedBox(height: 24),
-          Row(
-            children: [
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () => _pickAndReadPDF(isStructured: false),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: _green,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: const Column(
-                    children: [
-                      Icon(Icons.bolt_rounded, size: 20),
-                      SizedBox(height: 4),
-                      Text(
-                        'Standard',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
+          SizedBox(
+            width: double.infinity,
+            child: ElevatedButton.icon(
+              onPressed: _showModePicker,
+              icon: const Icon(Icons.upload_file_rounded, size: 20),
+              label: const Text(
+                'Select PDF',
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w700),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: _green,
+                foregroundColor: Colors.white,
+                elevation: 0,
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(14),
                 ),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: ElevatedButton(
-                  onPressed: () => _pickAndReadPDF(isStructured: true),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.purple.shade400,
-                    foregroundColor: Colors.white,
-                    elevation: 0,
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                  ),
-                  child: const Column(
-                    children: [
-                      Icon(Icons.view_module_rounded, size: 20),
-                      SizedBox(height: 4),
-                      Text(
-                        'Structured',
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.bold,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ],
+            ),
           ),
         ],
       ),
@@ -2331,17 +2141,17 @@ ANSWER (be concise but helpful):''';
         const SizedBox(height: 14),
         GestureDetector(
           onTap: _extractedText.isNotEmpty
-              ? () {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (context) => FlashcardScreen(
-                        documentText: _extractedText,
-                        documentName: _selectedFileName,
-                      ),
+              ? () => Navigator.push(
+                  context,
+                  MaterialPageRoute(
+                    builder: (context) => FlashcardScreen(
+                      documentText: _extractedText,
+                      documentName: _selectedFileName,
+                      activeGeminiKey: _activeGeminiKey,
+                      activeGroqKey: _activeGroqKey,
                     ),
-                  );
-                }
+                  ),
+                )
               : () => _pickAndReadPDF(
                   onComplete: () async {
                     if (_extractedText.isNotEmpty) {
@@ -2351,6 +2161,8 @@ ANSWER (be concise but helpful):''';
                           builder: (context) => FlashcardScreen(
                             documentText: _extractedText,
                             documentName: _selectedFileName,
+                            activeGeminiKey: _activeGeminiKey,
+                            activeGroqKey: _activeGroqKey,
                           ),
                         ),
                       );
@@ -2428,7 +2240,7 @@ ANSWER (be concise but helpful):''';
             GestureDetector(
               onTap: () => Navigator.push(
                 context,
-                MaterialPageRoute(builder: (context) => const HistoryScreen()),
+                MaterialPageRoute(builder: (_) => const HistoryScreen()),
               ),
               child: const Text(
                 'View All',
@@ -2468,7 +2280,6 @@ ANSWER (be concise but helpful):''';
             : Column(
                 children: _recentSessions.asMap().entries.map((entry) {
                   final session = entry.value;
-
                   final icons = [
                     Icons.menu_book_rounded,
                     Icons.science_rounded,
@@ -2618,17 +2429,17 @@ ANSWER (be concise but helpful):''';
           SizedBox(
             width: double.infinity,
             child: ElevatedButton.icon(
-              onPressed: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => FlashcardScreen(
-                      documentText: _extractedText,
-                      documentName: _selectedFileName,
-                    ),
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(
+                  builder: (context) => FlashcardScreen(
+                    documentText: _extractedText,
+                    documentName: _selectedFileName,
+                    activeGeminiKey: _activeGeminiKey,
+                    activeGroqKey: _activeGroqKey,
                   ),
-                );
-              },
+                ),
+              ),
               icon: const Icon(Icons.bolt_rounded),
               label: const Text('GENERATE FLASHCARDS'),
               style: ElevatedButton.styleFrom(
@@ -2675,33 +2486,42 @@ ANSWER (be concise but helpful):''';
     String studyGuide = "";
 
     try {
-      if (_summary.contains('[EXECUTIVE_SUMMARY]')) {
-        executiveSummary = _summary
-            .split('[EXECUTIVE_SUMMARY]')[1]
-            .split('[')[0]
-            .trim();
+      // Robust extraction: find each tag by indexOf, then substring between them.
+      // Handles \r\n line endings, extra whitespace, and ** wrapping by the AI.
+      // Strip any ** wrapping the AI might add around headers first.
+      final cleaned = _summary
+          .replaceAll(RegExp(r'\*\*\['), '[')
+          .replaceAll(RegExp(r'\]\*\*'), ']');
+
+      int _tagEnd(String tag) {
+        final idx = cleaned.indexOf('[$tag]');
+        return idx == -1 ? -1 : idx + '[$tag]'.length;
       }
-      if (_summary.contains('[KEY_THEMES_AND_CONCEPTS]')) {
-        keyThemes = _summary
-            .split('[KEY_THEMES_AND_CONCEPTS]')[1]
-            .split('[')[0]
-            .trim();
+
+      String _extract(String tag, String? nextTag) {
+        final start = _tagEnd(tag);
+        if (start == -1) return '';
+        final end = nextTag != null ? cleaned.indexOf('[$nextTag]', start) : -1;
+        final raw = end == -1
+            ? cleaned.substring(start)
+            : cleaned.substring(start, end);
+        return raw.trim();
       }
-      if (_summary.contains('[DETAILED_ANALYSIS]')) {
-        analysis = _summary
-            .split('[DETAILED_ANALYSIS]')[1]
-            .split('[')[0]
-            .trim();
-      }
-      if (_summary.contains('[PRACTICAL_APPLICATIONS]')) {
-        practicalApps = _summary
-            .split('[PRACTICAL_APPLICATIONS]')[1]
-            .split('[')[0]
-            .trim();
-      }
-      if (_summary.contains('[STUDY_GUIDE_AND_REFLECTIONS]')) {
-        studyGuide = _summary.split('[STUDY_GUIDE_AND_REFLECTIONS]')[1].trim();
-      }
+
+      executiveSummary = _extract(
+        'EXECUTIVE_SUMMARY',
+        'KEY_THEMES_AND_CONCEPTS',
+      );
+      keyThemes = _extract('KEY_THEMES_AND_CONCEPTS', 'DETAILED_ANALYSIS');
+      analysis = _extract('DETAILED_ANALYSIS', 'PRACTICAL_APPLICATIONS');
+      practicalApps = _extract(
+        'PRACTICAL_APPLICATIONS',
+        'STUDY_GUIDE_AND_REFLECTIONS',
+      );
+      studyGuide = _extract(
+        'STUDY_GUIDE_AND_REFLECTIONS',
+        null,
+      ); // last — no next tag
     } catch (e) {
       executiveSummary = _summary;
     }
@@ -2839,17 +2659,152 @@ ANSWER (be concise but helpful):''';
             ],
           ),
           const SizedBox(height: 14),
-          Text(
-            content,
-            style: TextStyle(
-              fontSize: 14,
-              height: 1.6,
-              color: _textDark.withOpacity(0.85),
-            ),
-          ),
+          _buildMarkdownText(content, _textDark.withOpacity(0.85)),
         ],
       ),
     );
+  }
+
+  /// Renders a subset of markdown without requiring any external package:
+  /// **bold**, *italic*, bullet lists (- / *), numbered lists, and plain paragraphs.
+  Widget _buildMarkdownText(String raw, Color textColor) {
+    final lines = raw.split('\n');
+    final widgets = <Widget>[];
+    bool inList = false;
+
+    for (int i = 0; i < lines.length; i++) {
+      final line = lines[i];
+      final trimmed = line.trim();
+
+      if (trimmed.isEmpty) {
+        if (inList) inList = false;
+        widgets.add(const SizedBox(height: 8));
+        continue;
+      }
+
+      // Bullet list item: starts with - or *
+      final bulletMatch = RegExp(r'^[-*]\s+(.+)$').firstMatch(trimmed);
+      if (bulletMatch != null) {
+        inList = true;
+        widgets.add(
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4, left: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.only(top: 7),
+                  child: Container(
+                    width: 5,
+                    height: 5,
+                    decoration: BoxDecoration(
+                      color: textColor.withOpacity(0.5),
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: _inlineMarkdown(bulletMatch.group(1)!, textColor),
+                ),
+              ],
+            ),
+          ),
+        );
+        continue;
+      }
+
+      // Numbered list: starts with "1." "2." etc.
+      final numberedMatch = RegExp(r'^(\d+)\.\s+(.+)$').firstMatch(trimmed);
+      if (numberedMatch != null) {
+        inList = true;
+        widgets.add(
+          Padding(
+            padding: const EdgeInsets.only(bottom: 4, left: 4),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  width: 22,
+                  child: Text(
+                    '${numberedMatch.group(1)}.',
+                    style: TextStyle(
+                      fontSize: 14,
+                      height: 1.6,
+                      fontWeight: FontWeight.w600,
+                      color: textColor,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: _inlineMarkdown(numberedMatch.group(2)!, textColor),
+                ),
+              ],
+            ),
+          ),
+        );
+        continue;
+      }
+
+      // Plain paragraph (may contain **bold** / *italic*)
+      if (inList) {
+        widgets.add(const SizedBox(height: 4));
+        inList = false;
+      }
+      widgets.add(
+        Padding(
+          padding: const EdgeInsets.only(bottom: 2),
+          child: _inlineMarkdown(trimmed, textColor),
+        ),
+      );
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: widgets,
+    );
+  }
+
+  /// Renders **bold** and *italic* inline markdown using RichText.
+  Widget _inlineMarkdown(String text, Color textColor) {
+    final spans = <InlineSpan>[];
+    final pattern = RegExp(r'\*\*(.+?)\*\*|\*(.+?)\*|([^*]+)');
+    for (final m in pattern.allMatches(text)) {
+      if (m.group(1) != null) {
+        spans.add(
+          TextSpan(
+            text: m.group(1),
+            style: TextStyle(
+              fontWeight: FontWeight.w700,
+              color: textColor,
+              fontSize: 14,
+              height: 1.6,
+            ),
+          ),
+        );
+      } else if (m.group(2) != null) {
+        spans.add(
+          TextSpan(
+            text: m.group(2),
+            style: TextStyle(
+              fontStyle: FontStyle.italic,
+              color: textColor,
+              fontSize: 14,
+              height: 1.6,
+            ),
+          ),
+        );
+      } else {
+        spans.add(
+          TextSpan(
+            text: m.group(3),
+            style: TextStyle(color: textColor, fontSize: 14, height: 1.6),
+          ),
+        );
+      }
+    }
+    return RichText(text: TextSpan(children: spans));
   }
 
   Widget _buildSummaryActionButton(
@@ -3099,11 +3054,8 @@ ANSWER (be concise but helpful):''';
           return GestureDetector(
             onTap: () {
               setState(() => _bottomNavIndex = i);
-              if (i == 0) {
-                _loadRecentSessions();
-              } else if (i == 3) {
-                _loadProfileStats();
-              }
+              if (i == 0) _loadRecentSessions();
+              if (i == 3) _loadProfileStats();
             },
             behavior: HitTestBehavior.opaque,
             child: SizedBox(
@@ -3316,9 +3268,7 @@ ANSWER (be concise but helpful):''';
               SizedBox(
                 width: double.infinity,
                 child: ElevatedButton(
-                  onPressed: () {
-                    setState(() => _showQuizResults = false);
-                  },
+                  onPressed: () => setState(() => _showQuizResults = false),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: _green,
                     foregroundColor: Colors.white,
@@ -3625,9 +3575,522 @@ ANSWER (be concise but helpful):''';
       ],
     );
   }
+
+  // ── Bottom Sheet helpers ───────────────────────────────────────────────────
+
+  void _showModePicker() {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => Container(
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 36),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Handle bar
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 24),
+            const Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Choose Study Mode',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  color: _textDark,
+                ),
+              ),
+            ),
+            const SizedBox(height: 6),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Select how you want to study your PDF',
+                style: TextStyle(fontSize: 13, color: _textGray),
+              ),
+            ),
+            const SizedBox(height: 20),
+
+            // Standard Mode Card
+            _buildModeCard(
+              icon: Icons.bolt_rounded,
+              iconColor: _green,
+              iconBg: const Color(0xFFEBFBDF),
+              title: 'Standard Mode',
+              description:
+                  'Load the entire PDF at once. Best for short documents, quick revision, or when you want a full overview — summary, quiz, flashcards and chat all at once.',
+              badge: 'Recommended',
+              badgeColor: _green,
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickAndReadPDF(isStructured: false);
+              },
+            ),
+            const SizedBox(height: 14),
+
+            // Structured Mode Card
+            _buildModeCard(
+              icon: Icons.view_module_rounded,
+              iconColor: Colors.purple.shade500,
+              iconBg: Colors.purple.shade50,
+              title: 'Structured Mode',
+              description:
+                  'Split the PDF into modules and study chapter by chapter. Ideal for large textbooks or when you want to track progress across multiple sessions.',
+              badge: 'For large PDFs',
+              badgeColor: Colors.purple.shade400,
+              onTap: () {
+                Navigator.pop(ctx);
+                _pickAndReadPDF(isStructured: true);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildModeCard({
+    required IconData icon,
+    required Color iconColor,
+    required Color iconBg,
+    required String title,
+    required String description,
+    required String badge,
+    required Color badgeColor,
+    required VoidCallback onTap,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(18),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.grey.shade200, width: 1.5),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withOpacity(0.04),
+              blurRadius: 10,
+              offset: const Offset(0, 4),
+            ),
+          ],
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Icon
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: iconBg,
+                borderRadius: BorderRadius.circular(14),
+              ),
+              child: Icon(icon, color: iconColor, size: 26),
+            ),
+            const SizedBox(width: 16),
+            // Text content
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: _textDark,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 3,
+                        ),
+                        decoration: BoxDecoration(
+                          color: badgeColor.withOpacity(0.12),
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                        child: Text(
+                          badge,
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w700,
+                            color: badgeColor,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    description,
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: _textGray,
+                      height: 1.5,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(
+              Icons.arrow_forward_ios_rounded,
+              size: 14,
+              color: Colors.grey.shade400,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showStructuredConfigSheet() async {
+    int selectedPages = 10;
+    return showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      isDismissible: false,
+      enableDrag: false,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+          ),
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 24),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              Row(
+                children: [
+                  Icon(
+                    Icons.view_module_rounded,
+                    color: Colors.purple.shade400,
+                    size: 28,
+                  ),
+                  const SizedBox(width: 12),
+                  const Text(
+                    'Structured Learning',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: _textDark,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Pages per Module',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: _textDark,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Divide your document into bite-sized segments (1-50 pages).',
+                  style: TextStyle(fontSize: 13, color: _textGray),
+                ),
+              ),
+              const SizedBox(height: 32),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildCountButton(
+                    setSheetState,
+                    selectedPages,
+                    (val) => setSheetState(() => selectedPages = val),
+                    maxVal: 50,
+                  ),
+                  Text(
+                    '$selectedPages',
+                    style: TextStyle(
+                      fontSize: 48,
+                      fontWeight: FontWeight.w900,
+                      color: Colors.purple.shade400,
+                    ),
+                  ),
+                  _buildCountButton(
+                    setSheetState,
+                    selectedPages,
+                    (val) => setSheetState(() => selectedPages = val),
+                    isAdd: true,
+                    maxVal: 50,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  activeTrackColor: Colors.purple.shade400,
+                  inactiveTrackColor: Colors.purple.shade100,
+                  thumbColor: Colors.purple.shade400,
+                  overlayColor: Colors.purple.withOpacity(0.2),
+                  valueIndicatorColor: _textDark,
+                  trackHeight: 6,
+                ),
+                child: Slider(
+                  value: selectedPages.toDouble(),
+                  min: 1,
+                  max: 50,
+                  divisions: 49,
+                  label: selectedPages.toString(),
+                  onChanged: (value) =>
+                      setSheetState(() => selectedPages = value.round()),
+                ),
+              ),
+              const SizedBox(height: 32),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton(
+                  onPressed: () {
+                    setState(() {
+                      _pagesPerModule = selectedPages;
+                      _bottomNavIndex = 2;
+                    });
+                    _loadModule(0);
+                    Navigator.pop(context);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.purple.shade400,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 16),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    elevation: 0,
+                  ),
+                  child: const Text(
+                    'Start Learning',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showQuizConfigSheet() async {
+    int selectedCount = 5;
+    return showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (context) => StatefulBuilder(
+        builder: (context, setSheetState) => Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(32)),
+          ),
+          padding: const EdgeInsets.fromLTRB(24, 12, 24, 32),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 24),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade300,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+              const Row(
+                children: [
+                  Icon(Icons.quiz_rounded, color: _green, size: 28),
+                  SizedBox(width: 12),
+                  Text(
+                    'Quiz Settings',
+                    style: TextStyle(
+                      fontSize: 22,
+                      fontWeight: FontWeight.w800,
+                      color: _textDark,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              const Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Number of Questions',
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.w600,
+                    color: _textDark,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 8),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Choose how many questions you want to solve (1-15)',
+                  style: TextStyle(fontSize: 13, color: _textGray),
+                ),
+              ),
+              const SizedBox(height: 32),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  _buildCountButton(
+                    setSheetState,
+                    selectedCount,
+                    (val) => setSheetState(() => selectedCount = val),
+                  ),
+                  Text(
+                    '$selectedCount',
+                    style: const TextStyle(
+                      fontSize: 48,
+                      fontWeight: FontWeight.w900,
+                      color: _green,
+                    ),
+                  ),
+                  _buildCountButton(
+                    setSheetState,
+                    selectedCount,
+                    (val) => setSheetState(() => selectedCount = val),
+                    isAdd: true,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  activeTrackColor: _green,
+                  inactiveTrackColor: _green.withOpacity(0.1),
+                  thumbColor: _green,
+                  overlayColor: _green.withOpacity(0.2),
+                  valueIndicatorColor: _textDark,
+                  trackHeight: 6,
+                ),
+                child: Slider(
+                  value: selectedCount.toDouble(),
+                  min: 1,
+                  max: 15,
+                  divisions: 14,
+                  label: selectedCount.toString(),
+                  onChanged: (val) =>
+                      setSheetState(() => selectedCount = val.toInt()),
+                ),
+              ),
+              const SizedBox(height: 40),
+              SizedBox(
+                width: double.infinity,
+                height: 56,
+                child: ElevatedButton(
+                  onPressed: () {
+                    Navigator.pop(context);
+                    _generateQuiz(count: selectedCount);
+                  },
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: _green,
+                    foregroundColor: Colors.white,
+                    elevation: 0,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                  ),
+                  child: const Text(
+                    'Start Generating',
+                    style: TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildCountButton(
+    void Function(void Function()) setSheetState,
+    int current,
+    void Function(int) onChanged, {
+    bool isAdd = false,
+    int maxVal = 15,
+  }) {
+    bool disabled = isAdd ? current >= maxVal : current <= 1;
+    return GestureDetector(
+      onTap: disabled
+          ? null
+          : () => onChanged(isAdd ? current + 1 : current - 1),
+      child: Container(
+        width: 50,
+        height: 50,
+        decoration: BoxDecoration(
+          color: disabled ? Colors.grey.shade100 : _green.withOpacity(0.1),
+          borderRadius: BorderRadius.circular(15),
+        ),
+        child: Icon(
+          isAdd ? Icons.add_rounded : Icons.remove_rounded,
+          color: disabled ? Colors.grey.shade300 : _green,
+          size: 28,
+        ),
+      ),
+    );
+  }
 }
 
-// Custom painter for dashed border
+// ── Tool card data helper ──────────────────────────────────────────────────────
+class _ToolCardData {
+  final String title;
+  final String subtitle;
+  final IconData icon;
+  final Color color;
+  final int index;
+  final VoidCallback onTap;
+
+  const _ToolCardData(
+    this.title,
+    this.subtitle,
+    this.icon,
+    this.color,
+    this.index,
+    this.onTap,
+  );
+}
+
+// ── Custom painter for dashed border ──────────────────────────────────────────
 class _DashedBorderPainter extends CustomPainter {
   final Color color;
   final double radius;
